@@ -1,5 +1,6 @@
 #include "FinGenerator.hpp"
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
@@ -64,13 +65,32 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (section.empty())
         return TriangleMesh(); // plane doesn't intersect the solid -> no fin body
 
-    // PLACEHOLDER, to be replaced by T00-01-03/04: the real fin body is a truncated
-    // rectangle following the contour (rect - offset(contour)), extruded to `thickness`
-    // along n and mapped back to the bed frame. For now, just prove the slicing step and
-    // the empty/non-empty contract by triangulating the raw cross-section into a
+    // 2D fin region: a rectangle on the +u side of the section (from the section's
+    // u-midpoint out to `length` beyond its far edge, 0..`height` tall -- 0 = bed by
+    // contract), truncated by the section contour offset outward by `conn_gap`. This
+    // keeps the fin following the object's silhouette with a small standoff gap, and
+    // the flip (z_angle += PI, tested in test_fin.cpp) swaps which side is +u, so this
+    // single code path (always "+u side of the section bbox") handles both sides.
+    // Section cross-sections seen so far are convex (single rectangle), so the bbox
+    // midpoint split is sufficient; a concave section would need a centroid-based
+    // component filter instead (not needed by current tests).
+    BoundingBox bb      = get_extents(section);
+    coord_t     u_split = (bb.min.x() + bb.max.x()) / 2;
+    coord_t     u_out   = bb.max.x() + scaled(fin_bed_frame.length);
+    coord_t     w_top   = scaled(fin_bed_frame.height);
+    Polygon     rect{{u_split, coord_t(0)}, {u_out, coord_t(0)}, {u_out, w_top}, {u_split, w_top}};
+
+    ExPolygons contour_gap = offset_ex(section, float(scaled(fin_bed_frame.conn_gap)));
+    ExPolygons fin2d       = diff_ex(ExPolygons{ExPolygon{rect}}, contour_gap);
+    if (fin2d.empty())
+        return TriangleMesh(); // gap swallowed the whole rectangle -> no fin body
+
+    // PLACEHOLDER, to be replaced by T00-01-04: the real fin body is `fin2d` extruded
+    // to `thickness` along n and mapped back to the bed frame. For now, just prove the
+    // 2D-region step and the empty/non-empty contract by triangulating `fin2d` into a
     // zero-thickness slab lying on the fin plane (n = 0), then mapping it to the bed frame.
     indexed_triangle_set placeholder;
-    std::vector<Vec3d>   triangles = triangulate_expolygons_3d(section, 0.); // (u, w, n=0), mm
+    std::vector<Vec3d>   triangles = triangulate_expolygons_3d(fin2d, 0.); // (u, w, n=0), mm
     placeholder.vertices.reserve(triangles.size());
     placeholder.indices.reserve(triangles.size() / 3);
     for (size_t i = 0; i + 2 < triangles.size(); i += 3) {

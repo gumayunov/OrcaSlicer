@@ -224,3 +224,31 @@ TEST_CASE("fin: plane missing the object yields empty mesh", "[fin]")
 
     CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
 }
+
+// --- FinGenerator: 2D fin region (truncated rectangle) ----------------------
+
+TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 30);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 20.0;
+    f.length    = 6.0;
+    f.conn_gap  = 1.0;
+
+    TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE_FALSE(m.empty());
+
+    BoundingBoxf3 bb = m.bounding_box();
+    CHECK_THAT(bb.size().z(), WithinAbs(20.0, 0.5)); // height H
+    CHECK(bb.max.y() > 10.0);                        // fin extends along +u == +Y beyond the cube
+
+    // flipped: z_angle += PI swaps which side is +u -> mirrored to -Y
+    FinFeature g = f;
+    g.z_angle    = PI;
+    BoundingBoxf3 bbg = generate_one_fin(cube, g, /*layer_height=*/0.2, /*line_width=*/0.45).bounding_box();
+    CHECK(bbg.min.y() < -10.0);
+}
