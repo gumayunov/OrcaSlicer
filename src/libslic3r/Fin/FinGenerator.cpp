@@ -5,7 +5,9 @@
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
 
+#include <array>
 #include <cmath>
+#include <map>
 
 namespace Slic3r {
 
@@ -44,21 +46,48 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
 
 namespace {
 
+// Builds an indexed_triangle_set with *shared* vertices: every distinct point
+// gets one index, so coincident cap/side-wall corners weld into a manifold mesh
+// instead of a triangle soup (a soup renders and slices fine, but reports every
+// edge as open/non-manifold once attached as a ModelVolume, triggering GUI
+// repair warnings). Exact-match keying (no epsilon) is sufficient here:
+// coincident points are bit-identical because caps and side walls both derive
+// their coordinates from the same unscale<double>() of the same scaled
+// ExPolygon points (see Tesselate.cpp for the cap path), and keying on the
+// stored float representation additionally tolerates any sub-float-precision
+// double noise.
+class VertexWelder
+{
+public:
+    explicit VertexWelder(indexed_triangle_set& its) : m_its(its) {}
+
+    void add_triangle(const Vec3d& a, const Vec3d& b, const Vec3d& c)
+    {
+        m_its.indices.emplace_back(index_of(a), index_of(b), index_of(c));
+    }
+
+private:
+    int index_of(const Vec3d& p)
+    {
+        Vec3f pf = p.cast<float>();
+        auto [it, inserted] = m_map.emplace(std::array<float, 3>{pf.x(), pf.y(), pf.z()},
+                                            int(m_its.vertices.size()));
+        if (inserted)
+            m_its.vertices.emplace_back(pf);
+        return it->second;
+    }
+
+    indexed_triangle_set&               m_its;
+    std::map<std::array<float, 3>, int> m_map;
+};
+
 // Appends a triangle soup (flat list of Vec3d vertices, 3 per triangle, already
 // in mm -- triangulate_expolygon(s)_3d() unscale internally, see Tesselate.cpp)
-// to `out`, without deduplicating vertices shared between soups (side walls and
-// caps meet only at edges/corners; welding is not needed for a valid mesh here).
-void append_soup(indexed_triangle_set& out, const std::vector<Vec3d>& soup)
+// through the welder, sharing vertices with previously added geometry.
+void append_soup(VertexWelder& weld, const std::vector<Vec3d>& soup)
 {
-    out.vertices.reserve(out.vertices.size() + soup.size());
-    out.indices.reserve(out.indices.size() + soup.size() / 3);
-    for (size_t i = 0; i + 2 < soup.size(); i += 3) {
-        int base = int(out.vertices.size());
-        out.vertices.emplace_back(soup[i].cast<float>());
-        out.vertices.emplace_back(soup[i + 1].cast<float>());
-        out.vertices.emplace_back(soup[i + 2].cast<float>());
-        out.indices.emplace_back(base, base + 1, base + 2);
-    }
+    for (size_t i = 0; i + 2 < soup.size(); i += 3)
+        weld.add_triangle(soup[i], soup[i + 1], soup[i + 2]);
 }
 
 // One side-wall strip for a single ring (contour or hole) of `region`, in the
@@ -72,45 +101,39 @@ void append_soup(indexed_triangle_set& out, const std::vector<Vec3d>& soup)
 // and (p1,n0)-(p2,n1)-(p1,n1), has cross-product normal h*(dw,-du,0) with
 // h = n1-n0 > 0 -- i.e. it already points outward, so no extra winding flip
 // is needed for either ring kind.
-void add_side_walls_ring(indexed_triangle_set& out, const Points& ring, double n0, double n1)
+void add_side_walls_ring(VertexWelder& weld, const Points& ring, double n0, double n1)
 {
     size_t n = ring.size();
     if (n < 2)
         return;
-    std::vector<Vec3d> quad;
-    quad.reserve(6);
     for (size_t i = 0; i < n; ++i) {
         Vec2d p1 = unscale(ring[i]);
         Vec2d p2 = unscale(ring[(i + 1) % n]);
-        quad.clear();
-        quad.emplace_back(p1.x(), p1.y(), n0);
-        quad.emplace_back(p2.x(), p2.y(), n0);
-        quad.emplace_back(p2.x(), p2.y(), n1);
-        quad.emplace_back(p1.x(), p1.y(), n0);
-        quad.emplace_back(p2.x(), p2.y(), n1);
-        quad.emplace_back(p1.x(), p1.y(), n1);
-        append_soup(out, quad);
+        weld.add_triangle({p1.x(), p1.y(), n0}, {p2.x(), p2.y(), n0}, {p2.x(), p2.y(), n1});
+        weld.add_triangle({p1.x(), p1.y(), n0}, {p2.x(), p2.y(), n1}, {p1.x(), p1.y(), n1});
     }
 }
 
-void add_side_walls(indexed_triangle_set& out, const ExPolygon& region, double n0, double n1)
+void add_side_walls(VertexWelder& weld, const ExPolygon& region, double n0, double n1)
 {
-    add_side_walls_ring(out, region.contour.points, n0, n1);
+    add_side_walls_ring(weld, region.contour.points, n0, n1);
     for (const Polygon& hole : region.holes)
-        add_side_walls_ring(out, hole.points, n0, n1);
+        add_side_walls_ring(weld, hole.points, n0, n1);
 }
 
 // Extrudes `region` (u, w plane, scaled) into a closed prism spanning
 // n in [n0, n1] (mm), appended to `out` in the (u, w, n) plane frame.
 // Caps: bottom (n0) faces -n so its 2D triangulation is flipped; top (n1)
 // faces +n so it keeps the natural (CCW) winding -- both already unscaled
-// to mm by triangulate_expolygon_3d(), see Tesselate.cpp.
+// to mm by triangulate_expolygon_3d(), see Tesselate.cpp. All pieces share
+// one welder, so the result is a closed shared-vertex mesh (0 open edges).
 void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, double n1)
 {
+    VertexWelder weld(out);
     for (const ExPolygon& ep : region) {
-        append_soup(out, triangulate_expolygon_3d(ep, n0, /*flip=*/true));
-        append_soup(out, triangulate_expolygon_3d(ep, n1, /*flip=*/false));
-        add_side_walls(out, ep, n0, n1);
+        append_soup(weld, triangulate_expolygon_3d(ep, n0, /*flip=*/true));
+        append_soup(weld, triangulate_expolygon_3d(ep, n1, /*flip=*/false));
+        add_side_walls(weld, ep, n0, n1);
     }
 }
 

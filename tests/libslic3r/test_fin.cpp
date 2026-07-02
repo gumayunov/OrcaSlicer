@@ -302,6 +302,13 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     REQUIRE_FALSE(m.empty());
     CHECK(m.volume() > 0.0);
 
+    // The prism must be a welded shared-vertex mesh, not a per-facet triangle
+    // soup: a soup slices fine (position-based gap closing) but reports every
+    // edge as open/non-manifold once attached as a ModelVolume, triggering GUI
+    // repair warnings and disabling gizmos.
+    CHECK(m.stats().open_edges == 0);      // closed (manifold) surface
+    CHECK(m.stats().number_of_parts == 1); // one connected shell, not per-facet islands
+
     // fin2d is exactly known here: the plane (bed X=0) cuts the cube into a full
     // u in [-10,10], w in [0,30] cross-section; the fin rectangle is u in [0,16]
     // (u_split=0 .. bb.max+length=10+6), w in [0,15] (=height); the default 1mm
