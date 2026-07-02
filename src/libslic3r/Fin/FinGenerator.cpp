@@ -52,14 +52,15 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
 
     using namespace FinGeneratorInternal;
 
-    // Move the solid into the fin's plane frame, where the fin plane is Z' = 0
-    // (local z = n, the plane normal), and slice it there to get the cross-section
-    // contour in the (u, w) plane.
-    indexed_triangle_set its = solid_bed_frame;
-    its_transform(its, bed_to_plane(fin_bed_frame));
+    // Slice the solid in the fin's plane frame, where the fin plane is Z' = 0
+    // (local z = n, the plane normal), to get the cross-section contour in the
+    // (u, w) plane. params.trafo applies the frame change during slicing itself
+    // (single vertex pass, no mesh copy) -- the idiom used by PrintObject slicing.
+    MeshSlicingParamsEx params;
+    params.trafo = bed_to_plane(fin_bed_frame);
     // zs has exactly one entry, so slice_mesh_ex() always returns a vector of size 1
     // (with an empty ExPolygons inside when the plane misses the solid) -- .front() is safe.
-    ExPolygons section = slice_mesh_ex(its, std::vector<float>{0.f}).front(); // (u, w), scaled
+    ExPolygons section = slice_mesh_ex(solid_bed_frame, std::vector<float>{0.f}, params).front(); // (u, w), scaled
     if (section.empty())
         return TriangleMesh(); // plane doesn't intersect the solid -> no fin body
 

@@ -201,10 +201,8 @@ TEST_CASE("generate_one_fin returns an empty mesh for an empty solid", "[fin]")
 
 TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
 {
-    indexed_triangle_set cube = its_make_cube(20, 20, 20); // 0..20 box
-    // its_translate() doesn't exist for indexed_triangle_set; its_transform() with a
-    // translation-only Transform3f is the established pattern (see test_indexed_triangle_set.cpp).
-    its_transform(cube, identity3f().translate(Vec3f(-10.f, -10.f, 0.f))); // center XY on origin, base on bed
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);       // 0..20 box
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));               // center XY on origin, base on bed
 
     FinFeature f;
     f.anchor_xy = Vec2d(0.0, 0.0);
@@ -218,7 +216,7 @@ TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
 TEST_CASE("fin: plane missing the object yields empty mesh", "[fin]")
 {
     indexed_triangle_set cube = its_make_cube(10, 10, 10);
-    its_transform(cube, identity3f().translate(Vec3f(50.f, 50.f, 0.f))); // far from the plane
+    its_translate(cube, Vec3f(50.f, 50.f, 0.f)); // far from the plane
 
     FinFeature f;
     f.anchor_xy = Vec2d(0.0, 0.0);
