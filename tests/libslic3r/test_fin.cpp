@@ -252,3 +252,18 @@ TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
     BoundingBoxf3 bbg = generate_one_fin(cube, g, /*layer_height=*/0.2, /*line_width=*/0.45).bounding_box();
     CHECK(bbg.min.y() < -10.0);
 }
+
+TEST_CASE("fin: gap offset swallowing the whole rectangle yields empty mesh", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(10, 10, 10);
+    its_translate(cube, Vec3f(-5.f, -5.f, 0.f));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 8.0;
+    f.length    = 6.0;
+    f.conn_gap  = 100.0; // huge vs. length/section: offset(contour) covers the whole rect
+
+    CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
+}

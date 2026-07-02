@@ -72,16 +72,19 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     // the flip (z_angle += PI, tested in test_fin.cpp) swaps which side is +u, so this
     // single code path (always "+u side of the section bbox") handles both sides.
     // Section cross-sections seen so far are convex (single rectangle), so the bbox
-    // midpoint split is sufficient; a concave section would need a centroid-based
-    // component filter instead (not needed by current tests).
+    // midpoint split is sufficient. It can pick the wrong u on a concave section, or
+    // on a disjoint multi-component one (e.g. two separate legs crossing the plane),
+    // where the bbox midpoint may bisect the wrong side; the fix for both is the
+    // same: keep the diff components whose centroid u exceeds the section's centroid
+    // u (not needed by current tests).
     BoundingBox bb      = get_extents(section);
-    coord_t     u_split = (bb.min.x() + bb.max.x()) / 2;
+    coord_t     u_split = bb.center().x();
     coord_t     u_out   = bb.max.x() + scaled(fin_bed_frame.length);
     coord_t     w_top   = scaled(fin_bed_frame.height);
     Polygon     rect{{u_split, coord_t(0)}, {u_out, coord_t(0)}, {u_out, w_top}, {u_split, w_top}};
 
-    ExPolygons contour_gap = offset_ex(section, float(scaled(fin_bed_frame.conn_gap)));
-    ExPolygons fin2d       = diff_ex(ExPolygons{ExPolygon{rect}}, contour_gap);
+    ExPolygons contour_gap = offset_ex(section, scaled<float>(fin_bed_frame.conn_gap));
+    ExPolygons fin2d       = diff_ex(Polygons{rect}, contour_gap);
     if (fin2d.empty())
         return TriangleMesh(); // gap swallowed the whole rectangle -> no fin body
 
