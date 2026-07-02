@@ -5,9 +5,11 @@
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
+#include <optional>
 
 namespace Slic3r {
 
@@ -41,6 +43,8 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
     }
     return out;
 }
+
+int fin_connector_rows(const FinFeature& f) { return int(std::floor(f.height / f.conn_step)) + 1; }
 
 } // namespace FinGeneratorInternal
 
@@ -137,6 +141,58 @@ void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, d
     }
 }
 
+// Where the horizontal line y = w (scaled u,w plane) crosses `section`'s ring
+// edges (contours and holes alike -- a ring is just a loop of edges, so both
+// walk the same way), returning the extreme u among all crossings (max if
+// max_side, else min), unscaled to mm. nullopt when no edge crosses the line
+// -- i.e. w is strictly above the model's own top (or the model has no
+// material at all), the caller's signal to skip a connector tab there
+// (design doc §13.3: a row *at* the model's top still gets a tab, only rows
+// *above* it don't -- see the "fin taller than the model" test).
+//
+// Edge-inclusion rule: a non-horizontal edge p1->p2 with y-span
+// [y0, y1] = [min(y1,y2), max(y1,y2)] counts as crossing iff y0 <= w <= y1
+// (closed on both ends). Horizontal edges (y0 == y1) are dropped outright --
+// they would divide by zero computing an intersection u, and don't carry one
+// anyway (an edge running *along* the query line has no single crossing
+// point; the two adjacent non-horizontal edges already supply the real
+// corner points at that height). A closed interval can report the same
+// vertex twice when the query line passes exactly through it (both adjacent
+// edges include it as an endpoint) -- harmless here since both give the
+// identical u, and callers only want the extreme value, not a crossing
+// count/parity. Being closed at *both* ends (not a half-open [y0, y1)) is
+// what makes both boundary rows behave as intended without any epsilon
+// nudge: y0 <= w covers w=0 at the bed (an object's cross-section never dips
+// below w=0, so every edge touching the bed has 0 as its lower endpoint),
+// and w <= y1 covers w exactly at the model's own top (its upper endpoint).
+std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool max_side)
+{
+    std::optional<double> best;
+    auto                  scan_ring = [&](const Points& ring) {
+        size_t n = ring.size();
+        for (size_t i = 0; i < n; ++i) {
+            const Point& p1 = ring[i];
+            const Point& p2 = ring[(i + 1) % n];
+            if (p1.y() == p2.y())
+                continue; // horizontal edge: no well-defined single crossing u
+            coord_t y0 = std::min(p1.y(), p2.y());
+            coord_t y1 = std::max(p1.y(), p2.y());
+            if (w < y0 || w > y1)
+                continue; // outside [y0, y1]
+            double t = double(w - p1.y()) / double(p2.y() - p1.y());
+            double u = double(p1.x()) + t * double(p2.x() - p1.x());
+            if (!best || (max_side ? u > *best : u < *best))
+                best = u;
+        }
+    };
+    for (const ExPolygon& ep : section) {
+        scan_ring(ep.contour.points);
+        for (const Polygon& hole : ep.holes)
+            scan_ring(hole.points);
+    }
+    return best ? std::make_optional(unscale<double>(*best)) : std::nullopt;
+}
+
 } // namespace
 
 TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
@@ -144,10 +200,6 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
                                double                       layer_height,
                                double                       line_width)
 {
-    // layer_height/line_width drive the connector tabs (T00-01-05); unused until then.
-    (void) layer_height;
-    (void) line_width;
-
     using namespace FinGeneratorInternal;
 
     // Slice the solid in the fin's plane frame, where the fin plane is Z' = 0
@@ -186,10 +238,33 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
         return TriangleMesh(); // gap swallowed the whole rectangle -> no fin body
 
     // Extrude fin2d into a solid prism along n (the plane normal), centered on the
-    // fin plane: n in [-thickness/2, +thickness/2]. Connector tabs are added later
-    // (T00-01-05), before the transform to the bed frame.
+    // fin plane: n in [-thickness/2, +thickness/2].
     indexed_triangle_set fin_local; // plane-frame coords (x=u, y=w, z=n), mm
     add_prism(fin_local, fin2d, -fin_bed_frame.thickness / 2., fin_bed_frame.thickness / 2.);
+
+    // Connector tabs (T00-01-05): small boxes bridging conn_gap, one row every
+    // conn_step mm along w, starting at the bed (w=0) up to and including
+    // height. Each tab is centered on the fin plane (n in [-line_width,
+    // +line_width], i.e. 2 perimeters wide) and reaches 0.1mm past both the
+    // model's own surface and the fin wall's near face, so it overlaps both
+    // even though its_merge() below appends it as a topologically separate
+    // shell (no shared vertices with the wall -- see the VertexWelder comment
+    // above; that's fine here, tabs need not be welded to slice and print).
+    // A row with no material at that height (w above the model's own top)
+    // gets no tab -- contour_u_at() returns nullopt there (design doc §13.3).
+    int n_rows = fin_connector_rows(fin_bed_frame);
+    for (int k = 0; k < n_rows; ++k) {
+        double                w         = k * fin_bed_frame.conn_step;
+        std::optional<double> u_surface = contour_u_at(section, scaled(w), /*max_side=*/true);
+        if (!u_surface)
+            continue;
+        indexed_triangle_set tab = its_make_cube(fin_bed_frame.conn_gap + 0.2, // u: span the gap, +0.1 overlap each side
+                                                  layer_height,                // w: exactly one layer tall
+                                                  2.0 * line_width);           // n: two perimeters thick
+        its_translate(tab, Vec3f(float(*u_surface - 0.1), float(w), float(-line_width)));
+        its_merge(fin_local, tab);
+    }
+
     its_transform(fin_local, plane_to_bed(fin_bed_frame)); // plane frame -> bed frame
     return TriangleMesh(fin_local);
 }

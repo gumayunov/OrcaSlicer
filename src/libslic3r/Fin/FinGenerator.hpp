@@ -35,6 +35,12 @@ Transform3d bed_to_plane(const FinFeature& f);
 // (pass Transform3d::Identity() when the object is already given in the bed frame).
 indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform3d& to_bed);
 
+// Number of connector-tab rows: one every conn_step mm along the fin's height,
+// starting at w=0 (the bed) up to and including height. A row with no material
+// at that height (above the model's own top) is still counted here -- it is
+// generate_one_fin() that skips emitting a tab for it (design doc §13.3).
+int fin_connector_rows(const FinFeature& f);
+
 } // namespace FinGeneratorInternal
 
 } // namespace Slic3r

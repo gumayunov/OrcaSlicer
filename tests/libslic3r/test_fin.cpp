@@ -297,8 +297,10 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     f.height    = 15.0;
     f.length    = 6.0;
     f.thickness = 1.2;
+    // f.conn_step (4.0) and f.conn_gap (1.0) are left at their defaults.
 
-    TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    double layer_height = 0.2, line_width = 0.45;
+    TriangleMesh m = generate_one_fin(cube, f, layer_height, line_width);
     REQUIRE_FALSE(m.empty());
     CHECK(m.volume() > 0.0);
 
@@ -306,8 +308,18 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     // soup: a soup slices fine (position-based gap closing) but reports every
     // edge as open/non-manifold once attached as a ModelVolume, triggering GUI
     // repair warnings and disabling gizmos.
-    CHECK(m.stats().open_edges == 0);      // closed (manifold) surface
-    CHECK(m.stats().number_of_parts == 1); // one connected shell, not per-facet islands
+    CHECK(m.stats().open_edges == 0); // closed (manifold) surface: the wall shell
+                                       // AND every tab cube (its own closed box) are.
+
+    // Connector tabs (T00-01-05) are separate its_merge()'d shells -- no shared
+    // vertices with the wall or with each other (its_merge doesn't weld; see
+    // FinGenerator.cpp) -- so number_of_parts is exactly 1 (wall) + one per tab
+    // row, not 1: rows are w = 0, 4, 8, 12 (floor(15/4)+1 = 4 rows, conn_step=4
+    // default), all <= height=15 and all within the cube's full w in [0,30]
+    // cross-section, so every row gets a tab.
+    int n_tab_rows = FinGeneratorInternal::fin_connector_rows(f);
+    REQUIRE(n_tab_rows == 4);
+    CHECK(m.stats().number_of_parts == 1 + n_tab_rows); // one shell + one per tab
 
     // fin2d is exactly known here: the plane (bed X=0) cuts the cube into a full
     // u in [-10,10], w in [0,30] cross-section; the fin rectangle is u in [0,16]
@@ -316,5 +328,78 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     // rectangle, leaving fin2d = u in [11,16] x w in [0,15] -> area 5*15 = 75 mm^2.
     // volume = area * thickness confirms both the extrusion geometry and the
     // winding (a flipped/self-intersecting prism would not match this exactly).
-    CHECK_THAT(m.volume(), WithinAbs(75.0 * f.thickness, 0.05));
+    double wall_volume = 75.0 * f.thickness;
+    // Each tab is its_make_cube(conn_gap + 0.2, layer_height, 2*line_width) (see
+    // generate_one_fin): u spans the gap plus a 0.1mm overlap on each side, w is
+    // exactly one layer tall, n is two perimeters thick.
+    double tab_volume      = (f.conn_gap + 0.2) * layer_height * (2.0 * line_width);
+    double expected_volume = wall_volume + n_tab_rows * tab_volume;
+    CHECK_THAT(m.volume(), WithinAbs(expected_volume, 0.05));
+}
+
+// --- FinGenerator: connector tabs (T00-01-05) -------------------------------
+
+TEST_CASE("fin: fin_connector_rows == floor(H/X) + 1", "[fin]")
+{
+    FinFeature f;
+    f.height    = 20.0;
+    f.conn_step = 5.0;
+    CHECK(FinGeneratorInternal::fin_connector_rows(f) == 5); // w = 0,5,10,15,20
+
+    f.conn_step = 100.0;
+    CHECK(FinGeneratorInternal::fin_connector_rows(f) == 1); // only w = 0
+}
+
+TEST_CASE("fin: connector count = floor(H/X)+1", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 40);
+    its_translate(cube, Vec3f(-10, -10, 0));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 20.0;
+    f.length    = 6.0;
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    TriangleMesh with_tabs = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45); // 5 tabs
+
+    f.conn_step = 100.0; // only the z=0 tab
+    TriangleMesh one_tab = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+
+    REQUIRE_FALSE(with_tabs.empty());
+    REQUIRE_FALSE(one_tab.empty());
+    CHECK(with_tabs.volume() > one_tab.volume());
+
+    // Exact part counts pin the tab geometry down further than the volume
+    // comparison alone: 5 rows (w=0,5,...,20) vs. 1 row (w=0), all within the
+    // cube's full w in [0,40] cross-section, so every row gets a tab.
+    CHECK(with_tabs.stats().number_of_parts == 1 + 5);
+    CHECK(one_tab.stats().number_of_parts == 1 + 1);
+    CHECK(with_tabs.stats().open_edges == 0);
+    CHECK(one_tab.stats().open_edges == 0);
+}
+
+TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 10);
+    its_translate(cube, Vec3f(-10, -10, 0));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 30.0; // fin itself may exceed the model -- allowed
+    f.length    = 6.0;
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    // Rows above the model's own top (w=10) -- w=15,20,25,30 -- must be skipped
+    // by contour_u_at() (nullopt: no section contour up there), not crash.
+    TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    CHECK_FALSE(m.empty());
+    CHECK(m.stats().open_edges == 0);
+
+    // Rows w=0,5,10 are within the model's own height (10) -> 3 tabs.
+    CHECK(m.stats().number_of_parts == 1 + 3);
 }
