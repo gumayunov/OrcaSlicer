@@ -116,6 +116,33 @@ TEST_CASE("plane_to_bed at z_angle=0 locks the coordinate contract", "[fin]")
     CHECK_THAT(n_world.z(), WithinAbs(0.0, 1e-9));
 }
 
+TEST_CASE("plane_to_bed at z_angle=PI/2 pins the rotation sign", "[fin]")
+{
+    // At z_angle = 0 the -sin term of u vanishes, so a sign flip there would be
+    // invisible to the axis test above. Pin it at PI/2:
+    // u = (-sin, cos, 0) -> (-1, 0, 0), n = (cos, sin, 0) -> (0, 1, 0), w stays Z.
+    FinFeature f;
+    f.anchor_xy = Vec2d::Zero();
+    f.z_angle   = PI / 2.0;
+
+    Transform3d plane_to_bed = FinGeneratorInternal::plane_to_bed(f);
+    Vec3d       u_world      = plane_to_bed.linear() * Vec3d(1.0, 0.0, 0.0); // local x = u
+    Vec3d       w_world      = plane_to_bed.linear() * Vec3d(0.0, 1.0, 0.0); // local y = w
+    Vec3d       n_world      = plane_to_bed.linear() * Vec3d(0.0, 0.0, 1.0); // local z = n
+
+    CHECK_THAT(u_world.x(), WithinAbs(-1.0, 1e-9));
+    CHECK_THAT(u_world.y(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(u_world.z(), WithinAbs(0.0, 1e-9));
+
+    CHECK_THAT(w_world.x(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(w_world.y(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(w_world.z(), WithinAbs(1.0, 1e-9));
+
+    CHECK_THAT(n_world.x(), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(n_world.y(), WithinAbs(1.0, 1e-9));
+    CHECK_THAT(n_world.z(), WithinAbs(0.0, 1e-9));
+}
+
 TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
 {
     FinFeature f;

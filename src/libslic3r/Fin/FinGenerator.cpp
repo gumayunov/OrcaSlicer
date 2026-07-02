@@ -1,5 +1,7 @@
 #include "FinGenerator.hpp"
 
+#include "libslic3r/Model.hpp"
+
 #include <cmath>
 
 namespace Slic3r {
@@ -18,7 +20,9 @@ Transform3d plane_to_bed(const FinFeature& f)
     return m;
 }
 
-Transform3d bed_to_plane(const FinFeature& f) { return plane_to_bed(f).inverse(); }
+// plane_to_bed is a rigid transform (orthonormal linear part), so the cheap
+// transpose-based isometry inverse applies.
+Transform3d bed_to_plane(const FinFeature& f) { return plane_to_bed(f).inverse(Eigen::Isometry); }
 
 indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform3d& to_bed)
 {

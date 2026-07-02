@@ -1,9 +1,14 @@
 #pragma once
 
-#include "libslic3r/Model.hpp"
+#include "libslic3r/Point.hpp"
+// Complete type needed: generate_one_fin() returns TriangleMesh by value
+// (also provides indexed_triangle_set).
 #include "libslic3r/TriangleMesh.hpp"
 
 namespace Slic3r {
+
+class ModelObject;
+struct FinFeature;
 
 // Build a single fin from an explicit solid given in the BED frame (z=0 = bed).
 // Returns an empty mesh if the plane does not intersect the solid.
