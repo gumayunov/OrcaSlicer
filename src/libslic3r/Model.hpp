@@ -336,6 +336,25 @@ struct CutConnector
 
 using CutConnectors = std::vector<CutConnector>;
 
+// A vertical "fin": a thin breakaway wall hugging the object's cross-section.
+// Parameters are stored in object-local coordinates (anchor XY + azimuth); the
+// actual wall is always vertical in the bed frame and is generated at slice
+// time (see FinGenerator). Only these parameters persist.
+struct FinFeature {
+    Vec2d  anchor_xy {Vec2d::Zero()}; // plane anchor, object-local XY (design called it bed_pos)
+    double z_angle   {0.0};           // azimuth about vertical, object-local (flip = +PI)
+    double height    {10.0};          // H — rectangle height (mm)
+    double length    {8.0};           // L — outward reach (mm)
+    double thickness {1.2};           // t — fin wall thickness (mm)
+    double conn_step {4.0};           // X — vertical spacing of connectors (mm)
+    double conn_gap  {1.0};           // gap == connector length == contour-follow distance (mm)
+    bool   enabled   {true};
+
+    template<class Archive> void serialize(Archive& ar) {
+        ar(anchor_xy, z_angle, height, length, thickness, conn_step, conn_gap, enabled);
+    }
+};
+using FinFeatures = std::vector<FinFeature>;
 
 // Declared outside of ModelVolume, so it could be forward declared.
 enum class ModelVolumeType : int {
@@ -399,6 +418,8 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+
+    FinFeatures fins;   // vertical fins (ORC-005); generated at slice time
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
@@ -680,10 +701,10 @@ private:
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
+            m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, fins);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -693,10 +714,10 @@ private:
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
+            m_bounding_box_approx, m_bounding_box_approx_valid,
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, fins);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)

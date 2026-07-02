@@ -1139,6 +1139,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
     this->cut_id.copy(rhs.cut_id);
+    this->fins                        = rhs.fins;
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -1178,6 +1179,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
+    this->fins                        = std::move(rhs.fins);
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
