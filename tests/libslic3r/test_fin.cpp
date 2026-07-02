@@ -6,6 +6,8 @@
 
 #include <cereal/archives/binary.hpp>
 
+#include <cstdlib>
+#include <filesystem>
 #include <sstream>
 
 using namespace Slic3r;
@@ -402,4 +404,58 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
 
     // Rows w=0,5,10 are within the model's own height (10) -> 3 tabs.
     CHECK(m.stats().number_of_parts == 1 + 3);
+}
+
+// --- FinGenerator: visual checkpoint (T00-01-06) ----------------------------
+//
+// Not a real regression test: dumps binary STLs of the input cube and the
+// generated fin to disk so a human can eyeball the result in a mesh viewer.
+// Tagged "[.]" -- Catch2's hidden-test convention (any tag starting with '.'
+// sets TestCaseProperties::IsHidden; catch_test_case_registry_impl.cpp only
+// runs hidden cases when a filter explicitly names them). That means it is
+// excluded from a bare `libslic3r_tests` run and from `ctest` (which invokes
+// the binary with no filters), but runs via `libslic3r_tests "[fin-visual]"`.
+//
+// Set FIN_VISUAL_DIR to choose the output directory; otherwise it defaults to
+// the system temp dir.
+TEST_CASE("fin: visual STL dump for manual inspection", "[fin-visual][.]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 40); // 0..20 x 0..20 x 0..40
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));         // center XY on origin, base on bed
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    // height=25 (taller than the 10mm default) so the fin reads clearly
+    // against the 40mm-tall cube; length/thickness/conn_step/conn_gap stay
+    // at their defaults (8, 1.2, 4, 1).
+    f.height = 25.0;
+
+    double layer_height = 0.2, line_width = 0.45;
+    TriangleMesh fin = generate_one_fin(cube, f, layer_height, line_width);
+    REQUIRE_FALSE(fin.empty());
+
+    TriangleMesh cube_mesh(cube);
+    REQUIRE_FALSE(cube_mesh.empty());
+
+    std::filesystem::path out_dir;
+    if (const char* env = std::getenv("FIN_VISUAL_DIR"); env != nullptr && *env != '\0')
+        out_dir = env;
+    else
+        out_dir = std::filesystem::temp_directory_path();
+    std::filesystem::create_directories(out_dir);
+
+    std::filesystem::path cube_path = out_dir / "cube.stl";
+    std::filesystem::path fin_path  = out_dir / "fin.stl";
+
+    REQUIRE(cube_mesh.write_binary(cube_path.string().c_str()));
+    REQUIRE(fin.write_binary(fin_path.string().c_str()));
+
+    WARN("fin-visual: cube -> " << cube_path.string());
+    WARN("fin-visual: fin  -> " << fin_path.string());
+
+    CHECK(std::filesystem::exists(cube_path));
+    CHECK(std::filesystem::exists(fin_path));
+    CHECK(std::filesystem::file_size(cube_path) > 0);
+    CHECK(std::filesystem::file_size(fin_path) > 0);
 }
