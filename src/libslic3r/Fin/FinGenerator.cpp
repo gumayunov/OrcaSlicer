@@ -44,7 +44,12 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
     return out;
 }
 
-int fin_connector_rows(const FinFeature& f) { return int(std::floor(f.height / f.conn_step)) + 1; }
+int fin_connector_rows(const FinFeature& f)
+{
+    // +1e-9: fp rounding guard -- e.g. 15.0/0.3 == 49.9999... must not drop a row
+    // (conn_step comes from GUI input in Phase 04, so "nice" ratios are common).
+    return int(std::floor(f.height / f.conn_step + 1e-9)) + 1;
+}
 
 } // namespace FinGeneratorInternal
 
@@ -165,6 +170,10 @@ void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, d
 // nudge: y0 <= w covers w=0 at the bed (an object's cross-section never dips
 // below w=0, so every edge touching the bed has 0 as its lower endpoint),
 // and w <= y1 covers w exactly at the model's own top (its upper endpoint).
+//
+// Shares the multi-component/concave caveat documented at the fin2d rectangle
+// in generate_one_fin(): the extreme-u scan can pick the far edge of the wrong
+// disjoint piece of the section; same future centroid-filter fix applies.
 std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool max_side)
 {
     std::optional<double> best;
@@ -245,23 +254,24 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     // Connector tabs (T00-01-05): small boxes bridging conn_gap, one row every
     // conn_step mm along w, starting at the bed (w=0) up to and including
     // height. Each tab is centered on the fin plane (n in [-line_width,
-    // +line_width], i.e. 2 perimeters wide) and reaches 0.1mm past both the
-    // model's own surface and the fin wall's near face, so it overlaps both
+    // +line_width], i.e. 2 perimeters wide) and reaches kTabOverlap past both
+    // the model's own surface and the fin wall's near face, so it overlaps both
     // even though its_merge() below appends it as a topologically separate
     // shell (no shared vertices with the wall -- see the VertexWelder comment
     // above; that's fine here, tabs need not be welded to slice and print).
     // A row with no material at that height (w above the model's own top)
     // gets no tab -- contour_u_at() returns nullopt there (design doc §13.3).
+    constexpr double kTabOverlap = 0.1; // mm past the model surface / wall face, each side
     int n_rows = fin_connector_rows(fin_bed_frame);
     for (int k = 0; k < n_rows; ++k) {
         double                w         = k * fin_bed_frame.conn_step;
         std::optional<double> u_surface = contour_u_at(section, scaled(w), /*max_side=*/true);
         if (!u_surface)
             continue;
-        indexed_triangle_set tab = its_make_cube(fin_bed_frame.conn_gap + 0.2, // u: span the gap, +0.1 overlap each side
-                                                  layer_height,                // w: exactly one layer tall
-                                                  2.0 * line_width);           // n: two perimeters thick
-        its_translate(tab, Vec3f(float(*u_surface - 0.1), float(w), float(-line_width)));
+        indexed_triangle_set tab = its_make_cube(fin_bed_frame.conn_gap + 2.0 * kTabOverlap, // u: span the gap + overlaps
+                                                  layer_height,                              // w: exactly one layer tall
+                                                  2.0 * line_width);                         // n: two perimeters thick
+        its_translate(tab, Vec3f(float(*u_surface - kTabOverlap), float(w), float(-line_width)));
         its_merge(fin_local, tab);
     }
 

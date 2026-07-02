@@ -397,7 +397,7 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     // Rows above the model's own top (w=10) -- w=15,20,25,30 -- must be skipped
     // by contour_u_at() (nullopt: no section contour up there), not crash.
     TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
-    CHECK_FALSE(m.empty());
+    REQUIRE_FALSE(m.empty());
     CHECK(m.stats().open_edges == 0);
 
     // Rows w=0,5,10 are within the model's own height (10) -> 3 tabs.
