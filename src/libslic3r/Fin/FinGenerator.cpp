@@ -42,6 +42,80 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
 
 } // namespace FinGeneratorInternal
 
+namespace {
+
+// Appends a triangle soup (flat list of Vec3d vertices, 3 per triangle, already
+// in mm -- triangulate_expolygon(s)_3d() unscale internally, see Tesselate.cpp)
+// to `out`, without deduplicating vertices shared between soups (side walls and
+// caps meet only at edges/corners; welding is not needed for a valid mesh here).
+void append_soup(indexed_triangle_set& out, const std::vector<Vec3d>& soup)
+{
+    out.vertices.reserve(out.vertices.size() + soup.size());
+    out.indices.reserve(out.indices.size() + soup.size() / 3);
+    for (size_t i = 0; i + 2 < soup.size(); i += 3) {
+        int base = int(out.vertices.size());
+        out.vertices.emplace_back(soup[i].cast<float>());
+        out.vertices.emplace_back(soup[i + 1].cast<float>());
+        out.vertices.emplace_back(soup[i + 2].cast<float>());
+        out.indices.emplace_back(base, base + 1, base + 2);
+    }
+}
+
+// One side-wall strip for a single ring (contour or hole) of `region`, in the
+// (u, w, n) plane frame. Slic3r's ring convention (ExPolygon::contour is CCW,
+// holes are CW, see ExPolygon.hpp) makes the filled region lie consistently to
+// the *left* of the direction of travel for both ring kinds when walked in
+// their stored point order -- so contour and hole rings need no special-casing
+// here. For a ring edge p1->p2 = (du, dw), the outward (away from material) 2D
+// direction is the -90 deg (clockwise) rotation (dw, -du); the quad
+// [(p1,n0),(p2,n0),(p2,n1),(p1,n1)], split into triangles (p1,n0)-(p2,n0)-(p2,n1)
+// and (p1,n0)-(p2,n1)-(p1,n1), has cross-product normal h*(dw,-du,0) with
+// h = n1-n0 > 0 -- i.e. it already points outward, so no extra winding flip
+// is needed for either ring kind.
+void add_side_walls_ring(indexed_triangle_set& out, const Points& ring, double n0, double n1)
+{
+    size_t n = ring.size();
+    if (n < 2)
+        return;
+    std::vector<Vec3d> quad;
+    quad.reserve(6);
+    for (size_t i = 0; i < n; ++i) {
+        Vec2d p1 = unscale(ring[i]);
+        Vec2d p2 = unscale(ring[(i + 1) % n]);
+        quad.clear();
+        quad.emplace_back(p1.x(), p1.y(), n0);
+        quad.emplace_back(p2.x(), p2.y(), n0);
+        quad.emplace_back(p2.x(), p2.y(), n1);
+        quad.emplace_back(p1.x(), p1.y(), n0);
+        quad.emplace_back(p2.x(), p2.y(), n1);
+        quad.emplace_back(p1.x(), p1.y(), n1);
+        append_soup(out, quad);
+    }
+}
+
+void add_side_walls(indexed_triangle_set& out, const ExPolygon& region, double n0, double n1)
+{
+    add_side_walls_ring(out, region.contour.points, n0, n1);
+    for (const Polygon& hole : region.holes)
+        add_side_walls_ring(out, hole.points, n0, n1);
+}
+
+// Extrudes `region` (u, w plane, scaled) into a closed prism spanning
+// n in [n0, n1] (mm), appended to `out` in the (u, w, n) plane frame.
+// Caps: bottom (n0) faces -n so its 2D triangulation is flipped; top (n1)
+// faces +n so it keeps the natural (CCW) winding -- both already unscaled
+// to mm by triangulate_expolygon_3d(), see Tesselate.cpp.
+void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, double n1)
+{
+    for (const ExPolygon& ep : region) {
+        append_soup(out, triangulate_expolygon_3d(ep, n0, /*flip=*/true));
+        append_soup(out, triangulate_expolygon_3d(ep, n1, /*flip=*/false));
+        add_side_walls(out, ep, n0, n1);
+    }
+}
+
+} // namespace
+
 TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
                                const FinFeature&           fin_bed_frame,
                                double                       layer_height,
@@ -88,23 +162,13 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (fin2d.empty())
         return TriangleMesh(); // gap swallowed the whole rectangle -> no fin body
 
-    // PLACEHOLDER, to be replaced by T00-01-04: the real fin body is `fin2d` extruded
-    // to `thickness` along n and mapped back to the bed frame. For now, just prove the
-    // 2D-region step and the empty/non-empty contract by triangulating `fin2d` into a
-    // zero-thickness slab lying on the fin plane (n = 0), then mapping it to the bed frame.
-    indexed_triangle_set placeholder;
-    std::vector<Vec3d>   triangles = triangulate_expolygons_3d(fin2d, 0.); // (u, w, n=0), mm
-    placeholder.vertices.reserve(triangles.size());
-    placeholder.indices.reserve(triangles.size() / 3);
-    for (size_t i = 0; i + 2 < triangles.size(); i += 3) {
-        int base = int(placeholder.vertices.size());
-        placeholder.vertices.emplace_back(triangles[i].cast<float>());
-        placeholder.vertices.emplace_back(triangles[i + 1].cast<float>());
-        placeholder.vertices.emplace_back(triangles[i + 2].cast<float>());
-        placeholder.indices.emplace_back(base, base + 1, base + 2);
-    }
-    its_transform(placeholder, plane_to_bed(fin_bed_frame)); // plane frame -> bed frame
-    return TriangleMesh(placeholder);
+    // Extrude fin2d into a solid prism along n (the plane normal), centered on the
+    // fin plane: n in [-thickness/2, +thickness/2]. Connector tabs are added later
+    // (T00-01-05), before the transform to the bed frame.
+    indexed_triangle_set fin_local; // plane-frame coords (x=u, y=w, z=n), mm
+    add_prism(fin_local, fin2d, -fin_bed_frame.thickness / 2., fin_bed_frame.thickness / 2.);
+    its_transform(fin_local, plane_to_bed(fin_bed_frame)); // plane frame -> bed frame
+    return TriangleMesh(fin_local);
 }
 
 } // namespace Slic3r

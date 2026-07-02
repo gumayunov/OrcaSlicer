@@ -267,3 +267,47 @@ TEST_CASE("fin: gap offset swallowing the whole rectangle yields empty mesh", "[
 
     CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
 }
+
+// --- FinGenerator: prism extrusion (real wall thickness) -------------------
+
+TEST_CASE("fin: wall has the requested thickness", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 30);
+    its_translate(cube, Vec3f(-10, -10, 0));
+
+    FinFeature f;
+    f.anchor_xy  = Vec2d(0.0, 0.0);
+    f.z_angle    = 0.0;
+    f.height     = 15.0;
+    f.length     = 6.0;
+    f.thickness  = 1.2;
+
+    BoundingBoxf3 bb = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).bounding_box();
+    CHECK_THAT(bb.size().x(), WithinAbs(1.2, 0.05)); // thickness along n == X at angle 0
+}
+
+TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 30);
+    its_translate(cube, Vec3f(-10, -10, 0));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 15.0;
+    f.length    = 6.0;
+    f.thickness = 1.2;
+
+    TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE_FALSE(m.empty());
+    CHECK(m.volume() > 0.0);
+
+    // fin2d is exactly known here: the plane (bed X=0) cuts the cube into a full
+    // u in [-10,10], w in [0,30] cross-section; the fin rectangle is u in [0,16]
+    // (u_split=0 .. bb.max+length=10+6), w in [0,15] (=height); the default 1mm
+    // conn_gap offsets the section to u in [-11,11], eating u in [0,11] of the
+    // rectangle, leaving fin2d = u in [11,16] x w in [0,15] -> area 5*15 = 75 mm^2.
+    // volume = area * thickness confirms both the extrusion geometry and the
+    // winding (a flipped/self-intersecting prism would not match this exactly).
+    CHECK_THAT(m.volume(), WithinAbs(75.0 * f.thickness, 0.05));
+}
