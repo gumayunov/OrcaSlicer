@@ -196,3 +196,33 @@ TEST_CASE("generate_one_fin returns an empty mesh for an empty solid", "[fin]")
     TriangleMesh fin = generate_one_fin(empty_solid, f, /*layer_height=*/0.2, /*line_width=*/0.4);
     CHECK(fin.empty());
 }
+
+// --- FinGenerator: cross-section at the plane -------------------------------
+
+TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(20, 20, 20); // 0..20 box
+    // its_translate() doesn't exist for indexed_triangle_set; its_transform() with a
+    // translation-only Transform3f is the established pattern (see test_indexed_triangle_set.cpp).
+    its_transform(cube, identity3f().translate(Vec3f(-10.f, -10.f, 0.f))); // center XY on origin, base on bed
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 15.0;
+    f.length    = 8.0;
+
+    CHECK_FALSE(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
+}
+
+TEST_CASE("fin: plane missing the object yields empty mesh", "[fin]")
+{
+    indexed_triangle_set cube = its_make_cube(10, 10, 10);
+    its_transform(cube, identity3f().translate(Vec3f(50.f, 50.f, 0.f))); // far from the plane
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+
+    CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
+}

@@ -1,6 +1,8 @@
 #include "FinGenerator.hpp"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Tesselate.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 
 #include <cmath>
 
@@ -44,14 +46,41 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
                                double                       layer_height,
                                double                       line_width)
 {
-    // Cross-section (slice_mesh_ex), 2D region construction, extrusion, and connector
-    // tabs are implemented in later tasks (T00-01-02..05). For now this stub always
-    // returns an empty mesh, consistent with the "no intersection" contract.
-    (void) solid_bed_frame;
-    (void) fin_bed_frame;
+    // layer_height/line_width drive the connector tabs (T00-01-05); unused until then.
     (void) layer_height;
     (void) line_width;
-    return TriangleMesh();
+
+    using namespace FinGeneratorInternal;
+
+    // Move the solid into the fin's plane frame, where the fin plane is Z' = 0
+    // (local z = n, the plane normal), and slice it there to get the cross-section
+    // contour in the (u, w) plane.
+    indexed_triangle_set its = solid_bed_frame;
+    its_transform(its, bed_to_plane(fin_bed_frame));
+    // zs has exactly one entry, so slice_mesh_ex() always returns a vector of size 1
+    // (with an empty ExPolygons inside when the plane misses the solid) -- .front() is safe.
+    ExPolygons section = slice_mesh_ex(its, std::vector<float>{0.f}).front(); // (u, w), scaled
+    if (section.empty())
+        return TriangleMesh(); // plane doesn't intersect the solid -> no fin body
+
+    // PLACEHOLDER, to be replaced by T00-01-03/04: the real fin body is a truncated
+    // rectangle following the contour (rect - offset(contour)), extruded to `thickness`
+    // along n and mapped back to the bed frame. For now, just prove the slicing step and
+    // the empty/non-empty contract by triangulating the raw cross-section into a
+    // zero-thickness slab lying on the fin plane (n = 0), then mapping it to the bed frame.
+    indexed_triangle_set placeholder;
+    std::vector<Vec3d>   triangles = triangulate_expolygons_3d(section, 0.); // (u, w, n=0), mm
+    placeholder.vertices.reserve(triangles.size());
+    placeholder.indices.reserve(triangles.size() / 3);
+    for (size_t i = 0; i + 2 < triangles.size(); i += 3) {
+        int base = int(placeholder.vertices.size());
+        placeholder.vertices.emplace_back(triangles[i].cast<float>());
+        placeholder.vertices.emplace_back(triangles[i + 1].cast<float>());
+        placeholder.vertices.emplace_back(triangles[i + 2].cast<float>());
+        placeholder.indices.emplace_back(base, base + 1, base + 2);
+    }
+    its_transform(placeholder, plane_to_bed(fin_bed_frame)); // plane frame -> bed frame
+    return TriangleMesh(placeholder);
 }
 
 } // namespace Slic3r
