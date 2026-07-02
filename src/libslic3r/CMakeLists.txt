@@ -475,6 +475,8 @@ set(lisbslic3r_sources
     GCode/ToolOrderUtils.cpp
     FlushVolPredictor.hpp
     FlushVolPredictor.cpp
+    Fin/FinGenerator.cpp
+    Fin/FinGenerator.hpp
 )
 
 if (APPLE)
