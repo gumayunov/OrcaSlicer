@@ -279,4 +279,45 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     return TriangleMesh(fin_local);
 }
 
+std::vector<TriangleMesh> generate_fin_meshes(const ModelObject& o, const Transform3d& to_bed,
+                                               double              layer_height,
+                                               double              line_width)
+{
+    using namespace FinGeneratorInternal;
+
+    std::vector<TriangleMesh> out;
+
+    // Cheap early-out: an object with no enabled fins must do no work at all (no solid
+    // assembly below) -- callers rely on this to make the disabled/no-fin path a true
+    // no-op (see TransientFinGuard in PrintObjectSlice.cpp).
+    if (std::none_of(o.fins.begin(), o.fins.end(), [](const FinFeature& f) { return f.enabled; }))
+        return out;
+
+    indexed_triangle_set solid = object_solid_bed(o, to_bed);
+
+    for (const FinFeature& f : o.fins) {
+        if (!f.enabled)
+            continue;
+
+        // object-local anchor/azimuth -> bed frame (design §13.1-13.2):
+        // anchor: project the transformed anchor point to the bed plane.
+        // azimuth: heading of the transformed u-axis projected onto the bed plane.
+        Vec3d a_bed = to_bed * Vec3d(f.anchor_xy.x(), f.anchor_xy.y(), 0.);
+        Vec3d u_obj(-std::sin(f.z_angle), std::cos(f.z_angle), 0.);
+        Vec3d u_bed = to_bed.linear() * u_obj;
+        u_bed.z()   = 0.;
+        if (u_bed.norm() < EPSILON)
+            continue; // degenerate (plane axis became vertical) -> skip fin
+
+        FinFeature g = f;
+        g.anchor_xy = Vec2d(a_bed.x(), a_bed.y());
+        g.z_angle   = std::atan2(-u_bed.x(), u_bed.y()); // inverse of u = (-sin a, cos a)
+
+        TriangleMesh mesh = generate_one_fin(solid, g, layer_height, line_width);
+        if (!mesh.empty())
+            out.push_back(std::move(mesh));
+    }
+    return out;
+}
+
 } // namespace Slic3r

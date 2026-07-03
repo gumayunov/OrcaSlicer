@@ -1,10 +1,12 @@
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
 #include <tbb/parallel_for.h>
 
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
 #include "Exception.hpp"
+#include "Fin/FinGenerator.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MultiMaterialSegmentation.hpp"
@@ -1148,6 +1150,99 @@ void apply_fuzzy_skin_segmentation(PrintObject &print_object, ThrowOnCancel thro
 // this should be idempotent
 void PrintObject::slice_volumes()
 {
+    // RAII: merge transient fin geometry into an existing MODEL_PART ModelVolume's mesh
+    // for the duration of slicing below, then restore that volume's original mesh.
+    // `this->model_object()` is Print's OWN copy of the ModelObject
+    // (PrintObjectBase::model_object(), PrintBase.hpp) -- it is never serialized to .3mf
+    // and never shared with the GUI's model, so mutating it here cannot leak anywhere.
+    // Safe to run without additional locking because PrintObjects are sliced sequentially,
+    // one at a time (see the per-object `for (PrintObject *obj : m_objects)
+    // obj->make_perimeters();` loop in Print.cpp around line 2300) -- slice_volumes() of
+    // two different objects never overlaps. Placed as the very first statement (RAII
+    // destructor must run on every exit path, including exceptions/cancellation and this
+    // function's early "empty slice_zs" return below) and declared as a local struct
+    // because slice_volumes() has more than one return point, so the guard can't be
+    // limited to a single tail block.
+    //
+    // Merging into an *existing* volume's mesh (rather than adding a new ModelVolume, as
+    // originally sketched) is required, not just simpler: slice_volumes_inner() /
+    // slices_to_regions() below only slice volumes present in this PrintObject's
+    // PrintObjectRegions (m_shared_regions), a volume-id -> PrintRegion map built once per
+    // object in Print::apply(), long before this function runs (see
+    // generate_print_object_regions(), PrintApply.cpp). A brand-new ModelVolume's id is
+    // simply absent from that map and would be silently skipped by slicing -- confirmed by
+    // running the "enabled fin adds geometry" test against a real add_volume()-based
+    // version of this guard, which slices to byte-identical output as no fin at all.
+    // Merging into an already-mapped volume's mesh sidesteps the map entirely: the host
+    // volume's id, region assignment and PrintObjectRegions bounding-box entries are
+    // untouched, and slicing naturally picks up the extra geometry through that volume.
+    struct TransientFinGuard
+    {
+        ModelObject*                         mo       = nullptr;
+        ModelVolume*                         base_vol = nullptr; // existing MODEL_PART volume fins are merged into
+        std::shared_ptr<const TriangleMesh>  orig_mesh;          // base_vol's mesh before merging, for restoration
+
+        explicit TransientFinGuard(PrintObject& po) : mo(po.model_object())
+        {
+            // Cheap early-out: an object with no enabled fins must do nothing at all --
+            // no host-volume lookup, no Flow/width resolution, no mesh copy/merge -- so
+            // this is a true no-op for the (overwhelmingly common) no-fin case.
+            if (std::none_of(mo->fins.begin(), mo->fins.end(), [](const FinFeature& f) { return f.enabled; }))
+                return;
+
+            // Fins need an existing MODEL_PART volume to merge into and to attach to
+            // geometrically (object_solid_bed() below merges exactly these); with none,
+            // every fin's plane misses an empty solid and generate_fin_meshes() would
+            // return nothing anyway, so bail out before doing any further work.
+            for (ModelVolume* v : mo->volumes)
+                if (v->is_model_part()) { base_vol = v; break; }
+            if (base_vol == nullptr)
+                return;
+
+            const Transform3d to_bed       = po.trafo_centered();
+            const double      layer_height = po.config().layer_height.value;
+            // Fins aren't tied to any particular PrintRegion (material/extruder), so their
+            // wall reuses whatever width an ordinary inner perimeter of this object's first
+            // region would get: PrintRegionConfig::inner_wall_line_width, falling back to
+            // PrintObjectConfig::line_width, falling back to a nozzle-diameter-based auto
+            // width if both are 0 -- see PrintRegion::flow() / Flow::new_from_config_width().
+            // Tabs are 2*line_width thick (FinGenerator.cpp), so this must not be 0; since a
+            // MODEL_PART volume was just found above, this object has at least one printing
+            // region, so printing_region(0) is always valid here.
+            const double line_width = po.printing_region(0).flow(po, frPerimeter, layer_height, /*first_layer=*/false).width();
+
+            std::vector<TriangleMesh> fins = generate_fin_meshes(*mo, to_bed, layer_height, line_width);
+            if (fins.empty()) {
+                base_vol = nullptr; // nothing to merge -> ~TransientFinGuard() also becomes a no-op
+                return;
+            }
+
+            // bed frame -> base_vol's own local mesh frame: every volume is sliced under
+            // trafo_centered() * volume->get_matrix() (slice_volumes_inner() below), so
+            // merging fin triangles expressed in that local frame reproduces exactly the
+            // bed-frame geometry generate_fin_meshes() built, once sliced through the same
+            // composition.
+            const Transform3d bed_to_base_local = base_vol->get_matrix().inverse() * to_bed.inverse();
+
+            orig_mesh = base_vol->get_mesh_shared_ptr(); // keep the original mesh alive for restoration
+            indexed_triangle_set merged = orig_mesh->its;
+            for (TriangleMesh& fin : fins) {
+                its_transform(fin.its, bed_to_base_local);
+                its_merge(merged, fin.its);
+            }
+            base_vol->set_mesh(TriangleMesh(std::move(merged)));
+            mo->invalidate_bounding_box();
+        }
+
+        ~TransientFinGuard()
+        {
+            if (base_vol == nullptr)
+                return;
+            base_vol->set_mesh(orig_mesh);
+            mo->invalidate_bounding_box();
+        }
+    } fin_guard(*this);
+
     BOOST_LOG_TRIVIAL(info) << "Slicing volumes..." << log_memory_info();
     const Print *print                      = this->print();
     const auto   throw_on_cancel_callback   = std::function<void()>([print](){ print->throw_if_canceled(); });
