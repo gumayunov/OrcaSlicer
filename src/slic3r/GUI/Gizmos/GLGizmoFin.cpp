@@ -8,6 +8,8 @@
 
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp" // FinFeature
+#include "libslic3r/Fin/FinGenerator.hpp"
+#include "libslic3r/Flow.hpp"
 
 #include <glad/gl.h>
 #include <wx/utils.h>
@@ -22,6 +24,13 @@ static constexpr double MinFinDimension = 0.5; // mm -- the plane may not collap
 static constexpr double MinFinParamValue = 0.1; // mm -- thickness / connector step / gap must stay positive and printable
 static constexpr double MinRotationRingRadius = 7.5; // mm -- min ring diameter 15mm
 static constexpr unsigned int RotationRingSegments = 48;
+
+// Plane fill tint (T00-04-04): default vs. "no intersection with the object" (mirrors
+// GLGizmoCut3D's CUT_PLANE_DEF_COLOR / CUT_PLANE_ERR_COLOR switch in render_cut_plane()).
+static const ColorRGBA PlaneFillColor        = ColorRGBA(0.9f, 0.9f, 0.9f, 0.45f);
+static const ColorRGBA PlaneFillInvalidColor = ColorRGBA(1.0f, 0.8f, 0.8f, 0.5f);
+// Ghost preview mesh color: ColorRGBA::ORANGE() at preview alpha.
+static const ColorRGBA GhostColor = ColorRGBA(0.923f, 0.504f, 0.264f, 0.45f);
 
 GLGizmoFin::GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -45,8 +54,14 @@ void GLGizmoFin::on_set_state()
     // T00-04-02: no FinFeature is read from the object yet, so every activation
     // (re-)seeds the plane from sensible defaults. A later task (T00-04-05) will
     // load an existing FinFeature here instead, when one is selected/present.
-    if (get_state() == On)
+    if (get_state() == On) {
         init_from_selection();
+        // T00-04-04: the ghost-preview solid cache is keyed off the selected object/instance
+        // (see rebuild_object_solid()), but the object's geometry may have changed since this
+        // gizmo was last open even if the same instance is re-selected -- always rebuild fresh
+        // on activation rather than relying solely on the object/instance-idx comparison.
+        rebuild_object_solid();
+    }
 }
 
 void GLGizmoFin::init_from_selection()
@@ -70,6 +85,8 @@ void GLGizmoFin::init_from_selection()
     m_conn_step = defaults.conn_step;
     m_conn_gap  = defaults.conn_gap;
     m_enabled   = defaults.enabled;
+
+    m_ghost_dirty = true; // T00-04-04: the plane/params above just changed -- the cached ghost mesh is stale
 }
 
 bool GLGizmoFin::on_is_selectable() const
@@ -147,6 +164,117 @@ double GLGizmoFin::get_layer_height_snap_step() const
     return m_snap_step;
 }
 
+// Layer height for the ghost-preview mesh (connector tab thickness, generate_one_fin()'s
+// `layer_height` argument). Kept separate from get_layer_height_snap_step() above: that
+// function's fallback (m_snap_step, 1mm) is a UI drag-snap increment, not a physically
+// meaningful layer height to build geometry with.
+double GLGizmoFin::resolve_preview_layer_height() const
+{
+    if (wxGetApp().preset_bundle != nullptr) {
+        const double layer_height = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
+        if (layer_height > 0.0)
+            return layer_height;
+    }
+    return 0.2; // mm -- generic default, only reached without a loaded print preset (e.g. headless)
+}
+
+// Extrusion line width for the ghost-preview mesh (fin wall / connector tabs).
+// Preview fidelity is secondary (per the plan): this resolves the shared "line_width" print
+// option via Flow::extrusion_width(), the same utility Flow::new_from_config_width() (and so
+// PrintObjectSlice.cpp's TransientFinGuard, at slice time) ultimately falls back to for a
+// zero-valued *_line_width option -- it already implements the "0 -> nozzle-diameter-based
+// auto width" fallback (Flow::auto_extrusion_width(), 1.125x nozzle diameter for frPerimeter).
+// Unlike TransientFinGuard, this does not walk the inner_wall_line_width -> line_width chain
+// first, since no PrintRegion is available here; that only matters for exact width, not shape.
+double GLGizmoFin::resolve_preview_line_width() const
+{
+    if (wxGetApp().preset_bundle != nullptr) {
+        try {
+            const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
+            const double             width        = Flow::extrusion_width("line_width", full_config, 0);
+            if (width > 0.0)
+                return width;
+        } catch (const std::exception&) {
+            // Missing nozzle_diameter or similar (e.g. no printer preset loaded) -- fall
+            // through to the generic default below.
+        }
+    }
+    return 0.4; // mm -- generic default, only reached without a usable print/printer config
+}
+
+// Rebuilds m_object_solid_bed from the current selection: the selected instance's MODEL_PART
+// volumes, merged into the world/bed frame (the gizmo's world frame IS the bed frame -- see
+// the class doc comment). Cheap object/instance-idx bookkeeping so update_ghost_preview() can
+// tell whether this actually needs to run again; the mesh assembly/merge itself is not free,
+// so this must NOT run every render frame -- only on activation (on_set_state()) and when the
+// selected object/instance changes (the defensive check in update_ghost_preview()).
+void GLGizmoFin::rebuild_object_solid()
+{
+    const Selection& selection = m_parent.get_selection();
+    m_solid_object_idx   = selection.get_object_idx();
+    m_solid_instance_idx = selection.get_instance_idx();
+    m_object_solid_bed   = indexed_triangle_set();
+
+    if (m_solid_object_idx < 0 || m_solid_instance_idx < 0)
+        return; // nothing selected -- shouldn't happen while on_is_activable() gates this gizmo, but stay defensive
+
+    const ModelObjectPtrs& objects = wxGetApp().plater()->model().objects;
+    if (size_t(m_solid_object_idx) >= objects.size())
+        return;
+    const ModelObject* mo = objects[m_solid_object_idx];
+    if (mo == nullptr || size_t(m_solid_instance_idx) >= mo->instances.size())
+        return;
+
+    // Instance world transform only: FinGeneratorInternal::object_solid_bed() itself composes
+    // each volume's own get_matrix() on top of `to_bed`, exactly mirroring how GLVolume/
+    // Selection place an object's volumes in world space. No PrintObject::trafo_centered()
+    // involved here, unlike the slice-time path (PrintObjectSlice.cpp's TransientFinGuard):
+    // the gizmo has no PrintObject, and doesn't need one since its world frame already is the
+    // bed frame.
+    const Transform3d to_bed = mo->instances[m_solid_instance_idx]->get_matrix();
+    m_object_solid_bed       = FinGeneratorInternal::object_solid_bed(*mo, to_bed);
+
+    m_ghost_dirty = true; // the solid changed -- any cached ghost mesh is now stale
+}
+
+// Rebuilds the cached ghost-preview mesh (m_ghost_model / m_ghost_valid) via generate_one_fin(),
+// but only when actually dirty -- called every render frame, but a true no-op on most of them.
+// Dirtied by: on_stop_dragging() (drag-end, not per drag frame), ImGui parameter edits
+// (on_render_input_window()), and rebuild_object_solid() (the solid itself changed).
+void GLGizmoFin::update_ghost_preview()
+{
+    const Selection& selection = m_parent.get_selection();
+    if (selection.get_object_idx() != m_solid_object_idx || selection.get_instance_idx() != m_solid_instance_idx)
+        rebuild_object_solid(); // defensive: selection changed under us without an on_set_state() cycle
+
+    if (!m_ghost_dirty)
+        return;
+    m_ghost_dirty = false;
+
+    // Verbatim gizmo state -> bed-frame FinFeature (the plane already IS in the bed frame, so,
+    // unlike generate_fin_meshes()'s object-local -> bed conversion, no further transform is
+    // needed here). `enabled` is forced true: the preview always shows regardless of the
+    // panel's Enabled toggle, whose actual slicing semantics land in T00-04-05.
+    FinFeature fin_bed_frame;
+    fin_bed_frame.anchor_xy = Vec2d(m_plane_center.x(), m_plane_center.y());
+    fin_bed_frame.z_angle   = m_z_angle;
+    fin_bed_frame.height    = m_height;
+    fin_bed_frame.length    = m_length;
+    fin_bed_frame.thickness = m_thickness;
+    fin_bed_frame.conn_step = m_conn_step;
+    fin_bed_frame.conn_gap  = m_conn_gap;
+    fin_bed_frame.enabled   = true;
+
+    const TriangleMesh mesh = generate_one_fin(m_object_solid_bed, fin_bed_frame, resolve_preview_layer_height(), resolve_preview_line_width());
+
+    m_ghost_model.reset();
+    m_ghost_valid = !mesh.empty();
+    if (m_ghost_valid) {
+        m_ghost_model.init_from(mesh);
+        m_ghost_model.set_color(GhostColor);
+    }
+}
+
 void GLGizmoFin::init_rendering_items()
 {
     if (m_rendering_items_ready)
@@ -165,7 +293,7 @@ void GLGizmoFin::init_rendering_items()
     fill_data.add_vertex(Vec3f(0.0f, 1.0f, 0.0f));
     fill_data.add_triangle(0, 1, 2);
     fill_data.add_triangle(0, 2, 3);
-    fill_data.color = ColorRGBA(0.9f, 0.9f, 0.9f, 0.45f);
+    fill_data.color = PlaneFillColor; // overridden every frame in render_plane() (T00-04-04: red tint when invalid)
     m_plane_fill.init_from(std::move(fill_data));
 
     GLModel::Geometry border_data;
@@ -214,6 +342,9 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
 
     const Transform3d view_model_matrix = camera.get_view_matrix() * plane_m * Geometry::scale_transform(Vec3d(m_length, m_height, 1.0));
     shader->set_uniform("view_model_matrix", view_model_matrix);
+    // T00-04-04: tint the fill red when the plane misses the object's solid (no ghost to
+    // show), mirroring GLGizmoCut3D::render_cut_plane()'s CUT_PLANE_DEF_COLOR/ERR_COLOR switch.
+    m_plane_fill.set_color(m_ghost_valid ? PlaneFillColor : PlaneFillInvalidColor);
     m_plane_fill.render();
 
     shader->set_uniform("width", 0.5f);
@@ -223,6 +354,38 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
     glsafe(::glDisable(GL_BLEND));
 
     shader->stop_using();
+}
+
+// T00-04-04: the fin mesh generate_one_fin() currently produces for m_object_solid_bed and
+// the plane/params, rebuilt only by update_ghost_preview() (see its callers) -- never here.
+// Drawn after the plane, semi-transparent, depth-tested against the rest of the scene.
+void GLGizmoFin::render_ghost()
+{
+    if (!m_ghost_valid || m_ghost_model.is_empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
+    if (shader == nullptr)
+        return;
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    // The mesh is already expressed in the bed/world frame (generate_one_fin()'s contract),
+    // and the gizmo's world frame IS the bed frame, so no additional model transform is needed.
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("emission_factor", 0.2f);
+
+    m_ghost_model.render();
+
+    shader->stop_using();
+
+    glsafe(::glDisable(GL_BLEND));
 }
 
 void GLGizmoFin::render_rotation_ring()
@@ -265,9 +428,16 @@ void GLGizmoFin::on_render()
     glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
     glsafe(::glEnable(GL_DEPTH_TEST));
 
+    // T00-04-04: cheap no-op unless something is actually dirty (drag-end / ImGui edit /
+    // solid rebuild) -- see update_ghost_preview()'s doc comment. Must run before
+    // render_plane() so the red/default tint below reflects this frame's result, not the
+    // previous one.
+    update_ghost_preview();
+
     const Transform3d plane_m = plane_matrix();
 
     render_plane(plane_m);
+    render_ghost();
     render_rotation_ring();
 
     update_grabbers(plane_m);
@@ -289,6 +459,10 @@ void GLGizmoFin::on_start_dragging()
 void GLGizmoFin::on_stop_dragging()
 {
     m_drag_ref_captured = false;
+    // T00-04-04: rebuild the ghost preview once dragging ends -- not per drag frame. All four
+    // grabbers (Move/ZRotation/TopHeight/OuterLength) feed generate_one_fin() one way or
+    // another (anchor_xy, z_angle, height, length), so any drag can invalidate the cached mesh.
+    m_ghost_dirty = true;
 }
 
 double GLGizmoFin::calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const
@@ -410,18 +584,22 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     const float f_scale = m_parent.get_gizmos_manager().get_layout_scale();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f * f_scale));
 
+    // T00-04-04: any edit below that feeds generate_one_fin() invalidates the cached ghost
+    // preview; collected into one flag and applied once at the end rather than at each call
+    // site. (m_enabled is deliberately NOT included: the preview always uses enabled=true,
+    // see update_ghost_preview(), so toggling it alone never changes the generated mesh.)
+    bool params_changed = false;
+
     // H/L drive the plane rectangle drawn in on_render(); MinFinDimension mirrors the drag
     // clamp in on_dragging() so typing and dragging agree on the smallest allowed plane.
-    render_double_field(_u8L("Height (H)"), "##fin_height", m_height, MinFinDimension, "%.2f mm");
-    render_double_field(_u8L("Length (L)"), "##fin_length", m_length, MinFinDimension, "%.2f mm");
-    // t / X / gap don't yet feed the gizmo's rendering (no ghost preview until T00-04-04); a
-    // small positive floor just keeps them out of degenerate (zero/negative) territory.
-    render_double_field(_u8L("Thickness (t)"), "##fin_thickness", m_thickness, MinFinParamValue, "%.2f mm");
-    render_double_field(_u8L("Connector step (X)"), "##fin_conn_step", m_conn_step, MinFinParamValue, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Height (H)"), "##fin_height", m_height, MinFinDimension, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Length (L)"), "##fin_length", m_length, MinFinDimension, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Thickness (t)"), "##fin_thickness", m_thickness, MinFinParamValue, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Connector step (X)"), "##fin_conn_step", m_conn_step, MinFinParamValue, "%.2f mm");
 
     ImGui::Separator();
     m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _u8L("Advanced"));
-    render_double_field(_u8L("Gap"), "##fin_conn_gap", m_conn_gap, MinFinParamValue, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Gap"), "##fin_conn_gap", m_conn_gap, MinFinParamValue, "%.2f mm");
 
     ImGui::Separator();
 
@@ -431,23 +609,30 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width);
     double angle_deg = Geometry::rad2deg(m_z_angle);
-    if (ImGui::InputDouble("##fin_angle", &angle_deg, 0.0, 0.0, "%.1f°", ImGuiInputTextFlags_CharsDecimal))
+    if (ImGui::InputDouble("##fin_angle", &angle_deg, 0.0, 0.0, "%.1f°", ImGuiInputTextFlags_CharsDecimal)) {
         m_z_angle = Geometry::deg2rad(angle_deg);
+        params_changed = true;
+    }
 
     ImGui::SameLine();
-    if (m_imgui->button(_L("Flip side (180°)")))
+    if (m_imgui->button(_L("Flip side (180°)"))) {
         // Keep the displayed angle tidy across repeated flips/edits instead of letting it
         // grow unbounded; std::remainder wraps into (-180°, 180°].
         m_z_angle = std::remainder(m_z_angle + PI, 2.0 * PI);
+        params_changed = true;
+    }
 
     ImGui::Separator();
 
     if (m_imgui->button(_L("Reset")))
-        init_from_selection();
+        init_from_selection(); // sets m_ghost_dirty itself; no need to fold into params_changed
 
     ImGui::SameLine();
     // Toggles m_enabled only; T00-04-05 wires this to whether the fin is actually generated.
     m_imgui->bbl_checkbox(_L("Enabled"), m_enabled);
+
+    if (params_changed)
+        m_ghost_dirty = true;
 
     ImGui::PopStyleVar(1); // ImGuiStyleVar_FramePadding
 

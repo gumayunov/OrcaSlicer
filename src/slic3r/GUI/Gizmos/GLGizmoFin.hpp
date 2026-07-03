@@ -4,6 +4,10 @@
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/GLModel.hpp"
 
+// Complete type needed: m_object_solid_bed below is a by-value indexed_triangle_set member
+// (the ghost-preview solid cache, T00-04-04), not just a reference/pointer.
+#include "libslic3r/TriangleMesh.hpp"
+
 namespace Slic3r {
 
 namespace GUI {
@@ -21,9 +25,9 @@ namespace GUI {
 //   n = horizontal plane normal
 // At z_angle == 0: u == +Y world, n == +X world.
 //
-// This gizmo only owns transient UI state; later tasks read/write it from/to a
-// FinFeature on the object (T00-04-05) and add an ImGui panel (T00-04-03) and a
-// ghost mesh preview (T00-04-04).
+// This gizmo only owns transient UI state; a later task (T00-04-05) reads/writes it
+// from/to a FinFeature on the object. The ImGui panel (T00-04-03) and ghost mesh
+// preview (T00-04-04) are both already wired up here.
 class GLGizmoFin : public GLGizmoBase
 {
     enum GrabberID {
@@ -40,9 +44,9 @@ class GLGizmoFin : public GLGizmoBase
     double m_height{ 10.0 };                // H: plane extent in Z, from the bed
     double m_length{ 8.0 };                 // L: plane extent along u, outward
 
-    // Fin generation parameters not yet reflected in the plane geometry (T00-04-04 will use
-    // them for the ghost preview, T00-04-05 will persist them to ModelObject::fins). Defaults
-    // mirror FinFeature's; reset alongside the plane state in init_from_selection().
+    // Fin generation parameters, fed into generate_one_fin() for the ghost preview below
+    // (T00-04-04); T00-04-05 will persist them to ModelObject::fins. Defaults mirror
+    // FinFeature's; reset alongside the plane state in init_from_selection().
     double m_thickness{ 1.2 };  // t: fin wall thickness
     double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
     double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
@@ -68,6 +72,22 @@ class GLGizmoFin : public GLGizmoBase
     GLModel m_plane_border;
     GLModel m_rotation_ring; // unit circle, scaled to rotation_ring_radius() at render time
     bool    m_rendering_items_ready{ false };
+
+    // Ghost preview (T00-04-04): the fin mesh generate_one_fin() would produce for the current
+    // plane/params, rendered semi-transparent over the plane. Two independent caches, each
+    // rebuilt only when its own inputs change (never per render frame):
+    //  - m_object_solid_bed: the selected instance's MODEL_PART volumes, merged in the world/bed
+    //    frame. Depends only on WHICH object/instance is selected (and its geometry), not on the
+    //    plane -- moving/rotating/resizing the plane must not touch this.
+    //  - m_ghost_model / m_ghost_valid: generate_one_fin()'s result for the solid above and the
+    //    current plane/params. Rebuilt on drag-end and on ImGui parameter edits (m_ghost_dirty),
+    //    plus whenever the solid itself was just rebuilt.
+    indexed_triangle_set m_object_solid_bed;
+    int                  m_solid_object_idx{ -1 };   // Selection::get_object_idx() the solid above was built from
+    int                  m_solid_instance_idx{ -1 }; // Selection::get_instance_idx(), ditto
+    bool                 m_ghost_dirty{ true };      // true => update_ghost_preview() must rebuild m_ghost_model
+    bool                 m_ghost_valid{ true };      // false => last generate_one_fin() was empty (plane misses the solid)
+    GLModel              m_ghost_model;
 
 public:
     GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
@@ -99,6 +119,13 @@ private:
     double      rotation_ring_radius() const;
     double      get_layer_height_snap_step() const;
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
+
+    // Ghost preview (T00-04-04).
+    void   rebuild_object_solid();
+    void   update_ghost_preview();
+    void   render_ghost();
+    double resolve_preview_layer_height() const;
+    double resolve_preview_line_width() const;
 
     // ImGui side panel (T00-04-03).
     void init_input_window_layout();
