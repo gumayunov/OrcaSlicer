@@ -96,7 +96,20 @@ void GLGizmoFin::on_unregister_raycasters_for_picking()
 
 bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
 {
-    return use_grabbers(mouse_event);
+    if (use_grabbers(mouse_event))
+        return true;
+
+    // Consume left-clicks that did not interact with any grabber (but not the
+    // release of a camera drag): otherwise a stray click on empty space reaches
+    // GLCanvas3D's deselect path, which deselects the object, closes this gizmo
+    // and throws away the not-yet-persisted fin parameters (persistence comes
+    // with T00-04-05). Same mechanism as GLGizmoCut3D / GLGizmoPainterBase.
+    // The gizmo is exited via its toolbar icon or Esc (GLGizmosManager::on_char
+    // -> reset_all_states()).
+    if (mouse_event.LeftUp() && !m_parent.is_mouse_dragging())
+        return true;
+
+    return false;
 }
 
 Transform3d GLGizmoFin::plane_matrix() const
