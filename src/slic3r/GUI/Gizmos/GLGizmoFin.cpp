@@ -5,14 +5,17 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
+#include "slic3r/Utils/UndoRedo.hpp"
 
 #include "libslic3r/Geometry.hpp"
-#include "libslic3r/Model.hpp" // FinFeature
+#include "libslic3r/Model.hpp" // FinFeature, ModelObject
 #include "libslic3r/Fin/FinGenerator.hpp"
 #include "libslic3r/Flow.hpp"
 
 #include <glad/gl.h>
 #include <wx/utils.h>
+
+#include <boost/log/trivial.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -51,9 +54,6 @@ std::string GLGizmoFin::on_get_name() const
 
 void GLGizmoFin::on_set_state()
 {
-    // T00-04-02: no FinFeature is read from the object yet, so every activation
-    // (re-)seeds the plane from sensible defaults. A later task (T00-04-05) will
-    // load an existing FinFeature here instead, when one is selected/present.
     if (get_state() == On) {
         init_from_selection();
         // T00-04-04: the ghost-preview solid cache is keyed off the selected object/instance
@@ -64,11 +64,42 @@ void GLGizmoFin::on_set_state()
     }
 }
 
+// T00-04-05: loads the selected object's existing fin (fins[0] -- single-fin UX for now) when
+// there is one, converting object-local -> world via fin_object_to_bed() (the exact inverse of
+// apply_to_model()'s world -> object-local conversion; see FinGenerator.hpp). Falls back to
+// reset_to_defaults() for a fin-less object, or if the instance transform degenerates the
+// stored fin's axes (fin_object_to_bed() returns nullopt -- e.g. the object was rotated
+// elsewhere into an orientation where the fin's plane axis is no longer horizontal).
 void GLGizmoFin::init_from_selection()
 {
-    // Recomputed on every activation for now -- nothing persists yet. T00-04-05
-    // will read the object's stored FinFeature first and only fall back to these
-    // defaults for a new fin.
+    const ModelObject* mo = selected_model_object();
+    if (mo != nullptr && !mo->fins.empty()) {
+        if (const std::optional<Transform3d> to_bed = selected_instance_matrix(); to_bed.has_value()) {
+            if (const std::optional<FinFeature> fin_world = FinGeneratorInternal::fin_object_to_bed(mo->fins.front(), *to_bed);
+                fin_world.has_value()) {
+                m_plane_center = Vec3d(fin_world->anchor_xy.x(), fin_world->anchor_xy.y(), 0.0);
+                m_z_angle      = fin_world->z_angle;
+                m_height       = fin_world->height;
+                m_length       = fin_world->length;
+                m_thickness    = fin_world->thickness;
+                m_conn_step    = fin_world->conn_step;
+                m_conn_gap     = fin_world->conn_gap;
+                m_enabled      = fin_world->enabled;
+                m_ghost_dirty  = true; // T00-04-04: the plane/params above just changed
+                return;
+            }
+            BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: stored fin's object-local axes are degenerate "
+                                           "under the current instance transform -- falling back to defaults";
+        }
+    }
+    reset_to_defaults();
+}
+
+// Factory-default plane/params for a new fin -- also the Reset button's target (unlike
+// init_from_selection(), this never reads ModelObject::fins, so Reset always lands here
+// regardless of whether a fin is already stored on the object).
+void GLGizmoFin::reset_to_defaults()
+{
     // Anchor at the instance's own +Y silhouette edge, not the bbox center (design doc §15): with
     // window semantics the gizmo rectangle is the literal bound of where fin material may exist,
     // so a center anchor would put the whole window inside the part for anything wider than 2*L,
@@ -290,8 +321,27 @@ void GLGizmoFin::update_ghost_preview()
     // moved/rotated/scaled or got volumes added/removed while this gizmo stayed open (e.g.
     // via the sidebar fields) -- the cached bed-frame solid describes the OLD placement, so
     // re-derive it (which also marks the ghost dirty for regeneration below).
-    if (solid_cache_stale())
+    if (solid_cache_stale()) {
+        // Distinguish "a DIFFERENT object/instance got selected" (e.g. the user clicked another
+        // object in the scene or the object list while this gizmo stayed open -- on_is_activable()
+        // keeps it open as long as the new selection is still a single full instance) from "the
+        // SAME object/instance moved/rotated/gained-or-lost a volume". Only the former must reload
+        // the plane/params (T00-04-05): otherwise the previous object's plane position could
+        // silently get applied onto the new object on its next commit. The latter must NOT touch
+        // plane/params -- that would blow away in-progress edits every time the object is nudged.
+        const Selection& selection       = m_parent.get_selection();
+        const bool       identity_changed = selection.get_object_idx() != m_solid_object_idx
+                                          || selection.get_instance_idx() != m_solid_instance_idx;
+        if (identity_changed && !is_dragging()) {
+            // Guard against is_dragging(): can't really happen via the mouse (dragging holds the
+            // button down, so no other object can be clicked mid-gesture), but stay defensive --
+            // reloading plane/params out from under an in-flight drag would invalidate its
+            // m_drag_start_*/m_drag_ref_* reference state.
+            m_drag_ref_captured = false; // no pending gesture reference should survive onto the new object
+            init_from_selection();       // reload: the new object's own stored fin, or defaults
+        }
         rebuild_object_solid();
+    }
 
     if (!m_ghost_dirty)
         return;
@@ -300,7 +350,8 @@ void GLGizmoFin::update_ghost_preview()
     // Verbatim gizmo state -> bed-frame FinFeature (the plane already IS in the bed frame, so,
     // unlike generate_fin_meshes()'s object-local -> bed conversion, no further transform is
     // needed here). `enabled` is forced true: the preview always shows regardless of the
-    // panel's Enabled toggle, whose actual slicing semantics land in T00-04-05.
+    // panel's Enabled toggle -- the toggle only affects what gets persisted/sliced (apply_to_model()
+    // below), not this live preview.
     FinFeature fin_bed_frame;
     fin_bed_frame.anchor_xy = Vec2d(m_plane_center.x(), m_plane_center.y());
     fin_bed_frame.z_angle   = m_z_angle;
@@ -319,6 +370,101 @@ void GLGizmoFin::update_ghost_preview()
         m_ghost_model.init_from(mesh);
         m_ghost_model.set_color(GhostColor);
     }
+}
+
+// --- Persistence (T00-04-05) -------------------------------------------------
+
+ModelObject* GLGizmoFin::selected_model_object() const
+{
+    const Selection& selection  = m_parent.get_selection();
+    const int         object_idx = selection.get_object_idx();
+    if (object_idx < 0)
+        return nullptr;
+    const ModelObjectPtrs& objects = wxGetApp().plater()->model().objects;
+    if (size_t(object_idx) >= objects.size())
+        return nullptr;
+    return objects[object_idx];
+}
+
+// The selected instance's current world transform (to_bed for this gizmo's purposes -- its
+// world frame IS the bed frame, see the class doc comment). A fresh lookup, deliberately
+// decoupled from the ghost-preview solid cache's m_solid_instance_matrix (that one is only
+// refreshed once per render frame, in on_render(), which is not guaranteed to have already run
+// before an apply triggered from the ImGui panel in the same frame).
+std::optional<Transform3d> GLGizmoFin::selected_instance_matrix() const
+{
+    const Selection& selection    = m_parent.get_selection();
+    const int         object_idx   = selection.get_object_idx();
+    const int         instance_idx = selection.get_instance_idx();
+    if (object_idx < 0 || instance_idx < 0)
+        return std::nullopt;
+    const ModelObject* mo = selected_model_object();
+    if (mo == nullptr || size_t(instance_idx) >= mo->instances.size())
+        return std::nullopt;
+    return mo->instances[instance_idx]->get_matrix();
+}
+
+// Writes the current gizmo (world-frame) state into the selected object's fins[0] (creating it
+// if the object had none yet -- single-fin UX for now), converting world -> object-local via
+// fin_bed_to_object() (FinGenerator.hpp; the exact inverse of init_from_selection()'s
+// fin_object_to_bed() call). Wrapped in one undo/redo snapshot per call -- callers are
+// responsible for calling this only once per user gesture (a drag's on_stop_dragging(), or an
+// ImGui field's commit/IsItemDeactivatedAfterEdit(), not every intermediate frame) so a single
+// drag or edit does not spam the undo stack. Schedules a background reslice on success, mirroring
+// how e.g. GLGizmoFdmSupports/GLGizmoBrimEars commit paint/point edits onto their ModelObject.
+// No-op (nothing persisted, no snapshot taken) when there is no valid single-instance selection,
+// or when the instance transform degenerates the fin's local axes (fin_bed_to_object() returns
+// nullopt -- see its doc comment); the latter is logged since it silently drops the edit.
+void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
+{
+    ModelObject* mo = selected_model_object();
+    if (mo == nullptr)
+        return;
+    const std::optional<Transform3d> to_bed = selected_instance_matrix();
+    if (!to_bed.has_value())
+        return;
+
+    FinFeature fin_world;
+    fin_world.anchor_xy = Vec2d(m_plane_center.x(), m_plane_center.y());
+    fin_world.z_angle   = m_z_angle;
+    fin_world.height    = m_height;
+    fin_world.length    = m_length;
+    fin_world.thickness = m_thickness;
+    fin_world.conn_step = m_conn_step;
+    fin_world.conn_gap  = m_conn_gap;
+    fin_world.enabled   = m_enabled;
+
+    const std::optional<FinFeature> fin_object = FinGeneratorInternal::fin_bed_to_object(fin_world, *to_bed);
+    if (!fin_object.has_value()) {
+        BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: instance transform makes the world -> object-local "
+                                       "fin conversion degenerate -- not persisting this edit";
+        return;
+    }
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
+    if (mo->fins.empty())
+        mo->fins.push_back(FinFeature{});
+    mo->fins.front() = *fin_object;
+
+    wxGetApp().plater()->set_plater_dirty(true);
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+}
+
+// "Remove fin" button (T00-04-05): clears the object's fins outright -- unlike the Enabled
+// checkbox (which persists enabled=false and leaves the stored fin otherwise intact, see
+// on_render_input_window()), this is how the user actually gets rid of one. No-op when the
+// object has no fin to remove (nothing to snapshot).
+void GLGizmoFin::remove_fin_from_model()
+{
+    ModelObject* mo = selected_model_object();
+    if (mo == nullptr || mo->fins.empty())
+        return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove fin"), UndoRedo::SnapshotType::GizmoAction);
+    mo->fins.clear();
+
+    wxGetApp().plater()->set_plater_dirty(true);
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
 void GLGizmoFin::init_rendering_items()
@@ -514,6 +660,16 @@ void GLGizmoFin::on_stop_dragging()
     // grabbers (Move/ZRotation/TopHeight/OuterLength) feed generate_one_fin() one way or
     // another (anchor_xy, z_angle, height, length), so any drag can invalidate the cached mesh.
     m_ghost_dirty = true;
+
+    // T00-04-05: persist on drag-end -- one snapshot per drag gesture (never per drag frame).
+    // Skip a no-op drag (e.g. a click that starts and immediately ends a "drag" without actually
+    // moving anything): only take a snapshot when the plane genuinely changed since
+    // on_start_dragging(), mirroring GLGizmoCut3D::on_stop_dragging()'s m_was_cut_plane_dragged
+    // guard around its own "Move cut plane" snapshot.
+    const bool changed = m_plane_center != m_drag_start_center || m_z_angle != m_drag_start_z_angle
+                       || m_height != m_drag_start_height || m_length != m_drag_start_length;
+    if (changed)
+        apply_to_model(_u8L("Edit fin"));
 }
 
 double GLGizmoFin::calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const
@@ -611,14 +767,18 @@ void GLGizmoFin::init_input_window_layout()
 // label: [input] row, mirroring GLGizmoCut3D::render_move_center_input()'s idiom (m_label_width
 // for the caption column, m_control_width for the field, plain ImGuiInputTextFlags_CharsDecimal
 // entry). Edits apply live (clamped to min_val) as soon as ImGui reports a change, so typing
-// immediately drives the gizmo state -- there is no separate "commit" step in this task.
-bool GLGizmoFin::render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format)
+// immediately drives the gizmo state and the live ghost preview. `committed` is OR-ed with
+// ImGui::IsItemDeactivatedAfterEdit() (true once, the frame the field loses focus after having
+// been edited) -- T00-04-05's signal for when to persist the field's value onto
+// ModelObject::fins, as opposed to every keystroke.
+bool GLGizmoFin::render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format, bool& committed)
 {
     m_imgui->text(label);
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width);
     double input = value;
     const bool changed = ImGui::InputDouble(imgui_id, &input, 0.0, 0.0, format, ImGuiInputTextFlags_CharsDecimal);
+    committed |= ImGui::IsItemDeactivatedAfterEdit();
     if (changed)
         value = std::max(min_val, input);
     return changed;
@@ -640,17 +800,22 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     // site. (m_enabled is deliberately NOT included: the preview always uses enabled=true,
     // see update_ghost_preview(), so toggling it alone never changes the generated mesh.)
     bool params_changed = false;
+    // T00-04-05: a field was "committed" (lost focus after being edited, or a single-shot button
+    // like Flip was pressed) this frame -- persist once at the end of this function, one snapshot
+    // per gesture, never per keystroke. Grabber drags persist separately, at drag-end
+    // (on_stop_dragging()); this flag only covers the ImGui panel.
+    bool field_committed = false;
 
     // H/L drive the plane rectangle drawn in on_render(); MinFinDimension mirrors the drag
     // clamp in on_dragging() so typing and dragging agree on the smallest allowed plane.
-    params_changed |= render_double_field(_u8L("Height (H)"), "##fin_height", m_height, MinFinDimension, "%.2f mm");
-    params_changed |= render_double_field(_u8L("Length (L)"), "##fin_length", m_length, MinFinDimension, "%.2f mm");
-    params_changed |= render_double_field(_u8L("Thickness (t)"), "##fin_thickness", m_thickness, MinFinParamValue, "%.2f mm");
-    params_changed |= render_double_field(_u8L("Connector step (X)"), "##fin_conn_step", m_conn_step, MinFinParamValue, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Height (H)"), "##fin_height", m_height, MinFinDimension, "%.2f mm", field_committed);
+    params_changed |= render_double_field(_u8L("Length (L)"), "##fin_length", m_length, MinFinDimension, "%.2f mm", field_committed);
+    params_changed |= render_double_field(_u8L("Thickness (t)"), "##fin_thickness", m_thickness, MinFinParamValue, "%.2f mm", field_committed);
+    params_changed |= render_double_field(_u8L("Connector step (X)"), "##fin_conn_step", m_conn_step, MinFinParamValue, "%.2f mm", field_committed);
 
     ImGui::Separator();
     m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _u8L("Advanced"));
-    params_changed |= render_double_field(_u8L("Gap"), "##fin_conn_gap", m_conn_gap, MinFinParamValue, "%.2f mm");
+    params_changed |= render_double_field(_u8L("Gap"), "##fin_conn_gap", m_conn_gap, MinFinParamValue, "%.2f mm", field_committed);
 
     ImGui::Separator();
 
@@ -664,26 +829,37 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
         m_z_angle = Geometry::deg2rad(angle_deg);
         params_changed = true;
     }
+    field_committed |= ImGui::IsItemDeactivatedAfterEdit();
 
     ImGui::SameLine();
     if (m_imgui->button(_L("Flip side (180°)"))) {
         // Keep the displayed angle tidy across repeated flips/edits instead of letting it
         // grow unbounded; std::remainder wraps into (-180°, 180°].
         m_z_angle = std::remainder(m_z_angle + PI, 2.0 * PI);
-        params_changed = true;
+        params_changed  = true;
+        field_committed = true; // a button click is its own complete gesture -- persist now
     }
 
     ImGui::Separator();
 
     if (m_imgui->button(_L("Reset")))
-        init_from_selection(); // sets m_ghost_dirty itself; no need to fold into params_changed
+        reset_to_defaults(); // sets m_ghost_dirty itself; does NOT touch ModelObject::fins (see its doc comment)
 
     ImGui::SameLine();
-    // Toggles m_enabled only; T00-04-05 wires this to whether the fin is actually generated.
-    m_imgui->bbl_checkbox(_L("Enabled"), m_enabled);
+    if (m_imgui->bbl_checkbox(_L("Enabled"), m_enabled))
+        // A checkbox toggle is its own atomic gesture (there is nothing to "commit" later) --
+        // persist immediately with its own snapshot, same as Flip/Remove fin below.
+        apply_to_model(_u8L("Toggle fin"));
+
+    // On its own row, separated from Reset/Enabled: unlike them, this is destructive (clears
+    // ModelObject::fins outright, see remove_fin_from_model()'s doc comment).
+    if (m_imgui->button(_L("Remove fin")))
+        remove_fin_from_model();
 
     if (params_changed)
         m_ghost_dirty = true;
+    if (field_committed)
+        apply_to_model(_u8L("Edit fin"));
 
     ImGui::PopStyleVar(1); // ImGuiStyleVar_FramePadding
 

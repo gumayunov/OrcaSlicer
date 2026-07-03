@@ -8,7 +8,12 @@
 // (the ghost-preview solid cache, T00-04-04), not just a reference/pointer.
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <optional>
+#include <string>
+
 namespace Slic3r {
+
+class ModelObject;
 
 namespace GUI {
 
@@ -114,6 +119,7 @@ protected:
 
 private:
     void init_from_selection();
+    void reset_to_defaults();
     void init_rendering_items();
     void update_grabbers(const Transform3d& plane_m);
     void render_plane(const Transform3d& plane_m);
@@ -135,7 +141,16 @@ private:
 
     // ImGui side panel (T00-04-03).
     void init_input_window_layout();
-    bool render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format);
+    bool render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format, bool& committed);
+
+    // Persistence (T00-04-05): world (gizmo) <-> object-local (ModelObject::fins) conversion,
+    // applying gizmo edits, and triggering a reslice. FinGeneratorInternal::fin_object_to_bed()/
+    // fin_bed_to_object() (FinGenerator.hpp) hold the shared math; this gizmo's world frame IS
+    // the bed frame (see the class doc comment), so "world" and "bed" mean the same thing below.
+    ModelObject*                selected_model_object() const;
+    std::optional<Transform3d>  selected_instance_matrix() const;
+    void                        apply_to_model(const std::string& snapshot_name);
+    void                        remove_fin_from_model();
 };
 
 } // namespace GUI
