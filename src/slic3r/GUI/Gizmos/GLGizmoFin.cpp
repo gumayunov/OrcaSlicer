@@ -3,6 +3,8 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp" // FinFeature
@@ -17,6 +19,7 @@ namespace Slic3r {
 namespace GUI {
 
 static constexpr double MinFinDimension = 0.5; // mm -- the plane may not collapse to zero size
+static constexpr double MinFinParamValue = 0.1; // mm -- thickness / connector step / gap must stay positive and printable
 static constexpr double MinRotationRingRadius = 6.0; // mm
 static constexpr unsigned int RotationRingSegments = 48;
 
@@ -60,7 +63,13 @@ void GLGizmoFin::init_from_selection()
     // coordinates and the instance sits on the bed), so the plane spans the whole
     // model instead of the (tiny) FinFeature 10mm default.
     m_height = std::max(MinFinDimension, bbox.max.z());
-    m_length = FinFeature().length;
+
+    const FinFeature defaults; // remaining fields just mirror FinFeature{} for now
+    m_length    = defaults.length;
+    m_thickness = defaults.thickness;
+    m_conn_step = defaults.conn_step;
+    m_conn_gap  = defaults.conn_gap;
+    m_enabled   = defaults.enabled;
 }
 
 bool GLGizmoFin::on_is_selectable() const
@@ -335,6 +344,98 @@ void GLGizmoFin::on_dragging(const UpdateData& data)
     default:
         break;
     }
+}
+
+void GLGizmoFin::init_input_window_layout()
+{
+    // Mirrors GLGizmoCut3D::init_input_window_data(): control width tracks the current font
+    // size and is recomputed every frame (the UI scale can change at runtime), while label
+    // width is the widest of the fixed field labels below, computed once and cached.
+    m_control_width = m_imgui->get_font_size() * 9.f;
+
+    if (m_label_width > 0.f)
+        return;
+
+    for (const std::string& label : { _u8L("Height (H)"), _u8L("Length (L)"), _u8L("Thickness (t)"),
+                                       _u8L("Connector step (X)"), _u8L("Gap"), _u8L("Angle") }) {
+        const float width = m_imgui->calc_text_size(label).x;
+        if (m_label_width < width)
+            m_label_width = width;
+    }
+    m_label_width += m_imgui->scaled(1.f);
+    m_label_width += ImGui::GetStyle().WindowPadding.x;
+}
+
+// label: [input] row, mirroring GLGizmoCut3D::render_move_center_input()'s idiom (m_label_width
+// for the caption column, m_control_width for the field, plain ImGuiInputTextFlags_CharsDecimal
+// entry). Edits apply live (clamped to min_val) as soon as ImGui reports a change, so typing
+// immediately drives the gizmo state -- there is no separate "commit" step in this task.
+bool GLGizmoFin::render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format)
+{
+    m_imgui->text(label);
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(m_control_width);
+    double input = value;
+    const bool changed = ImGui::InputDouble(imgui_id, &input, 0.0, 0.0, format, ImGuiInputTextFlags_CharsDecimal);
+    if (changed)
+        value = std::max(min_val, input);
+    return changed;
+}
+
+void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
+{
+    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+
+    init_input_window_layout();
+
+    const float f_scale = m_parent.get_gizmos_manager().get_layout_scale();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f * f_scale));
+
+    // H/L drive the plane rectangle drawn in on_render(); MinFinDimension mirrors the drag
+    // clamp in on_dragging() so typing and dragging agree on the smallest allowed plane.
+    render_double_field(_u8L("Height (H)"), "##fin_height", m_height, MinFinDimension, "%.2f mm");
+    render_double_field(_u8L("Length (L)"), "##fin_length", m_length, MinFinDimension, "%.2f mm");
+    // t / X / gap don't yet feed the gizmo's rendering (no ghost preview until T00-04-04); a
+    // small positive floor just keeps them out of degenerate (zero/negative) territory.
+    render_double_field(_u8L("Thickness (t)"), "##fin_thickness", m_thickness, MinFinParamValue, "%.2f mm");
+    render_double_field(_u8L("Connector step (X)"), "##fin_conn_step", m_conn_step, MinFinParamValue, "%.2f mm");
+
+    ImGui::Separator();
+    m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _u8L("Advanced"));
+    render_double_field(_u8L("Gap"), "##fin_conn_gap", m_conn_gap, MinFinParamValue, "%.2f mm");
+
+    ImGui::Separator();
+
+    // Angle: stored in radians (m_z_angle, consumed by plane_matrix()); displayed/edited in
+    // degrees, matching how GLGizmoRotate and GLGizmoCut3D's groove angle show angles to users.
+    m_imgui->text(_u8L("Angle"));
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(m_control_width);
+    double angle_deg = Geometry::rad2deg(m_z_angle);
+    if (ImGui::InputDouble("##fin_angle", &angle_deg, 0.0, 0.0, "%.1f°", ImGuiInputTextFlags_CharsDecimal))
+        m_z_angle = Geometry::deg2rad(angle_deg);
+
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Flip side (180°)")))
+        // Keep the displayed angle tidy across repeated flips/edits instead of letting it
+        // grow unbounded; std::remainder wraps into (-180°, 180°].
+        m_z_angle = std::remainder(m_z_angle + PI, 2.0 * PI);
+
+    ImGui::Separator();
+
+    if (m_imgui->button(_L("Reset")))
+        init_from_selection();
+
+    ImGui::SameLine();
+    // Toggles m_enabled only; T00-04-05 wires this to whether the fin is actually generated.
+    m_imgui->bbl_checkbox(_L("Enabled"), m_enabled);
+
+    ImGui::PopStyleVar(1); // ImGuiStyleVar_FramePadding
+
+    GizmoImguiEnd();
+    ImGuiWrapper::pop_toolbar_style();
 }
 
 } // namespace GUI

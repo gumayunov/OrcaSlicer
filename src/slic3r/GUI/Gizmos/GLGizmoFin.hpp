@@ -40,7 +40,19 @@ class GLGizmoFin : public GLGizmoBase
     double m_height{ 10.0 };                // H: plane extent in Z, from the bed
     double m_length{ 8.0 };                 // L: plane extent along u, outward
 
+    // Fin generation parameters not yet reflected in the plane geometry (T00-04-04 will use
+    // them for the ghost preview, T00-04-05 will persist them to ModelObject::fins). Defaults
+    // mirror FinFeature's; reset alongside the plane state in init_from_selection().
+    double m_thickness{ 1.2 };  // t: fin wall thickness
+    double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
+    double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
+    bool   m_enabled{ true };   // toggled by the panel checkbox; semantics land in T00-04-05
+
     double m_snap_step{ 1.0 };              // mm, translation / length snap with Shift held
+
+    // ImGui side panel layout (mirrors GLGizmoCut3D's m_label_width / m_control_width idiom).
+    float m_label_width{ 0.f };
+    float m_control_width{ 200.f };
 
     // Dragging scratch state, captured in on_start_dragging() / the first on_dragging() call.
     Vec3d  m_drag_start_center{ Vec3d::Zero() };
@@ -67,6 +79,7 @@ protected:
     std::string on_get_name() const override;
     void        on_set_state() override;
     void        on_render() override;
+    void        on_render_input_window(float x, float y, float bottom_limit) override;
     void        on_start_dragging() override;
     void        on_dragging(const UpdateData& data) override;
     void        on_stop_dragging() override;
@@ -86,6 +99,10 @@ private:
     double      rotation_ring_radius() const;
     double      get_layer_height_snap_step() const;
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
+
+    // ImGui side panel (T00-04-03).
+    void init_input_window_layout();
+    bool render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format);
 };
 
 } // namespace GUI
