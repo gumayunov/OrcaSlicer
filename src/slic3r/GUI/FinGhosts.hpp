@@ -18,6 +18,7 @@
 namespace Slic3r {
 
 class Model;
+class GLVolumeCollection;
 
 namespace GUI {
 
@@ -51,12 +52,16 @@ void render(GLModel& ghost, const Transform3d& model_matrix);
 class FinGhostsRenderer
 {
 public:
-    // Renders all ghosts. `skip_object` suppresses one object's ghosts entirely --
-    // pass the Fin gizmo's target object while that gizmo is open (it draws its own
-    // live, possibly-unsaved preview); ObjectID() (invalid) to skip nothing. Skipped
-    // objects' entries are GC'd while the gizmo is open, so closing it costs one
-    // immediate regen per instance -- intentional.
-    void render(const Model& model, const ObjectID& skip_object);
+    // Renders all ghosts. `volumes` supplies the LIVE per-instance world transforms:
+    // during an interactive drag Selection mutates only GLVolume trafos, ModelInstance
+    // catches up on mouse-up (GLCanvas3D::do_move()), so reading GLVolumes keeps ghosts
+    // following mid-drag; entries fall back to ModelInstance::get_matrix() when no
+    // GLVolume matches (they coincide outside a drag). `skip_object` suppresses one
+    // object's ghosts entirely -- pass the Fin gizmo's target object while that gizmo
+    // is open (it draws its own live, possibly-unsaved preview); ObjectID() (invalid)
+    // to skip nothing. Skipped objects' entries are GC'd while the gizmo is open, so
+    // closing it costs one immediate regen per instance -- intentional.
+    void render(const Model& model, const GLVolumeCollection& volumes, const ObjectID& skip_object);
 
 private:
     // Everything a ghost was generated from, compared each frame to detect staleness.

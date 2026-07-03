@@ -8346,7 +8346,7 @@ void GLCanvas3D::_render_fin_ghosts()
         if (object_idx >= 0 && object_idx < int(m_model->objects.size()))
             skip_object = m_model->objects[object_idx]->id();
     }
-    m_fin_ghosts.render(*m_model, skip_object);
+    m_fin_ghosts.render(*m_model, m_volumes, skip_object);
 }
 
 void GLCanvas3D::_check_and_update_toolbar_icon_scale()

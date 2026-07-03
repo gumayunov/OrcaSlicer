@@ -23,9 +23,10 @@ namespace FinGhost {
 static const ColorRGBA GhostColor = ColorRGBA(0.923f, 0.504f, 0.264f, 0.45f);
 
 // The edited print preset's layer height, or `fallback` when no usable print config is
-// loaded (e.g. running headless). The two call sites below need different fallbacks: a UI
-// drag-snap increment (m_snap_step) vs. a physically plausible layer height (0.2mm) to
-// build preview geometry with.
+// loaded (e.g. running headless). The two call sites need different fallbacks: a UI
+// drag-snap increment (m_snap_step, GLGizmoFin::get_layer_height_snap_step()) vs. a
+// physically plausible layer height (0.2mm, preview_layer_height() below) to build
+// preview geometry with.
 double preset_layer_height(double fallback)
 {
     if (wxGetApp().preset_bundle != nullptr) {
@@ -119,14 +120,23 @@ void render(GLModel& ghost, const Transform3d& model_matrix)
 
 } // namespace FinGhost
 
-void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
+void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& volumes, const ObjectID& skip_object)
 {
     for (auto& [key, entry] : m_entries)
         entry.visited = false;
 
+    // Live per-instance world transforms (see the header comment): first GLVolume of an
+    // (object, instance) pair wins -- all of an instance's volumes share the instance trafo.
+    std::map<std::pair<int, int>, Transform3d> live_trafos;
+    for (const GLVolume* v : volumes.volumes)
+        if (v != nullptr)
+            live_trafos.emplace(std::make_pair(v->object_idx(), v->instance_idx()),
+                                v->get_instance_transformation().get_matrix());
+
     bool params_refreshed = false; // at most one preset refresh per render() call
 
-    for (const ModelObject* mo : model.objects) {
+    for (int object_idx = 0; object_idx < int(model.objects.size()); ++object_idx) {
+        const ModelObject* mo = model.objects[object_idx];
         if (mo == nullptr || mo->id() == skip_object)
             continue;
         if (std::none_of(mo->fins.begin(), mo->fins.end(),
@@ -154,11 +164,13 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
             if (v->is_model_part())
                 volume_keys.push_back({ v->id(), v->get_matrix(), static_cast<const void*>(v->mesh_ptr().get()) });
 
-        for (const ModelInstance* instance : mo->instances) {
+        for (int instance_idx = 0; instance_idx < int(mo->instances.size()); ++instance_idx) {
+            const ModelInstance* instance = mo->instances[instance_idx];
             Entry& entry  = m_entries[{ mo->id().id, instance->id().id }];
             entry.visited = true;
 
-            const Transform3d to_bed = instance->get_matrix();
+            const auto        live   = live_trafos.find({ object_idx, instance_idx });
+            const Transform3d to_bed = live != live_trafos.end() ? live->second : instance->get_matrix();
             // Order matters: before the first generation entry.to_bed is a meaningless
             // identity and the delta with it is garbage -- key_stale short-circuits that.
             const bool key_stale = !entry.generated || entry.fins != mo->fins
