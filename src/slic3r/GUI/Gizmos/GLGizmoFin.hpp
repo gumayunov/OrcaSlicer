@@ -117,6 +117,7 @@ private:
 
     Transform3d plane_matrix() const;
     double      rotation_ring_radius() const;
+    double      preset_layer_height(double fallback) const;
     double      get_layer_height_snap_step() const;
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
 

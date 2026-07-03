@@ -153,29 +153,31 @@ double GLGizmoFin::rotation_ring_radius() const
     return std::max(0.5 * m_length, MinRotationRingRadius);
 }
 
-double GLGizmoFin::get_layer_height_snap_step() const
+// The edited print preset's layer height, or `fallback` when no usable print config is
+// loaded (e.g. running headless). The two call sites below need different fallbacks: a UI
+// drag-snap increment (m_snap_step) vs. a physically plausible layer height (0.2mm) to
+// build preview geometry with.
+double GLGizmoFin::preset_layer_height(double fallback) const
 {
     if (wxGetApp().preset_bundle != nullptr) {
         const double layer_height = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
         if (layer_height > 0.0)
             return layer_height;
     }
-    // No print config available (e.g. running headless) -- fall back to a plain mm snap.
-    return m_snap_step;
+    return fallback;
+}
+
+double GLGizmoFin::get_layer_height_snap_step() const
+{
+    // No print config available -- fall back to a plain mm snap.
+    return preset_layer_height(m_snap_step);
 }
 
 // Layer height for the ghost-preview mesh (connector tab thickness, generate_one_fin()'s
-// `layer_height` argument). Kept separate from get_layer_height_snap_step() above: that
-// function's fallback (m_snap_step, 1mm) is a UI drag-snap increment, not a physically
-// meaningful layer height to build geometry with.
+// `layer_height` argument).
 double GLGizmoFin::resolve_preview_layer_height() const
 {
-    if (wxGetApp().preset_bundle != nullptr) {
-        const double layer_height = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
-        if (layer_height > 0.0)
-            return layer_height;
-    }
-    return 0.2; // mm -- generic default, only reached without a loaded print preset (e.g. headless)
+    return preset_layer_height(0.2); // mm -- generic default, only reached without a loaded print preset
 }
 
 // Extrusion line width for the ghost-preview mesh (fin wall / connector tabs).
@@ -214,6 +216,11 @@ void GLGizmoFin::rebuild_object_solid()
     m_solid_object_idx   = selection.get_object_idx();
     m_solid_instance_idx = selection.get_instance_idx();
     m_object_solid_bed   = indexed_triangle_set();
+    // The solid just changed (cleared above; possibly refilled below) -- any cached ghost mesh
+    // is stale either way. Set before the early returns, so they cannot leave a ghost that was
+    // built against a solid that no longer exists on screen (update_ghost_preview() against the
+    // now-empty solid then correctly yields the invalid/red-plane state instead).
+    m_ghost_dirty = true;
 
     if (m_solid_object_idx < 0 || m_solid_instance_idx < 0)
         return; // nothing selected -- shouldn't happen while on_is_activable() gates this gizmo, but stay defensive
@@ -233,8 +240,6 @@ void GLGizmoFin::rebuild_object_solid()
     // bed frame.
     const Transform3d to_bed = mo->instances[m_solid_instance_idx]->get_matrix();
     m_object_solid_bed       = FinGeneratorInternal::object_solid_bed(*mo, to_bed);
-
-    m_ghost_dirty = true; // the solid changed -- any cached ghost mesh is now stale
 }
 
 // Rebuilds the cached ghost-preview mesh (m_ghost_model / m_ghost_valid) via generate_one_fin(),
@@ -368,7 +373,8 @@ void GLGizmoFin::render_ghost()
     if (shader == nullptr)
         return;
 
-    glsafe(::glEnable(GL_DEPTH_TEST));
+    // Depth test is already on (enabled at the top of on_render(), never disabled since:
+    // render_plane() re-enables it too and restores everything else it touches).
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
