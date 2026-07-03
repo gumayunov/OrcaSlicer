@@ -48,14 +48,19 @@ void GLGizmoFin::on_set_state()
 
 void GLGizmoFin::init_from_selection()
 {
+    // Recomputed on every activation for now -- nothing persists yet. T00-04-05
+    // will read the object's stored FinFeature first and only fall back to these
+    // defaults for a new fin.
     const BoundingBoxf3& bbox = m_parent.get_selection().get_bounding_box();
     const Vec3d center = bbox.center();
     m_plane_center = Vec3d(center.x(), center.y(), 0.0);
     m_z_angle      = 0.0;
 
-    const FinFeature defaults;
-    m_height = defaults.height;
-    m_length = defaults.length;
+    // Default H: the selected instance's world top above the bed (bbox is in world
+    // coordinates and the instance sits on the bed), so the plane spans the whole
+    // model instead of the (tiny) FinFeature 10mm default.
+    m_height = std::max(MinFinDimension, bbox.max.z());
+    m_length = FinFeature().length;
 }
 
 bool GLGizmoFin::on_is_selectable() const
