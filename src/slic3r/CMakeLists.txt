@@ -140,6 +140,8 @@ set(SLIC3R_GUI_SOURCES
     #GUI/Gizmos/GLGizmoFaceDetector.hpp
     GUI/Gizmos/GLGizmoFdmSupports.cpp
     GUI/Gizmos/GLGizmoFdmSupports.hpp
+    GUI/Gizmos/GLGizmoFin.cpp
+    GUI/Gizmos/GLGizmoFin.hpp
     GUI/Gizmos/GLGizmoFlatten.cpp
     GUI/Gizmos/GLGizmoFlatten.hpp
     GUI/Gizmos/GLGizmoFuzzySkin.cpp

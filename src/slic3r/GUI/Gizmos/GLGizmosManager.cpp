@@ -27,6 +27,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoFin.hpp"
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -176,6 +177,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::BrimEars):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg");
             break;
+        case (EType::Fin):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_fin_dark.svg" : "toolbar_fin.svg");
+            break;
         }
 
     }
@@ -219,6 +223,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoAssembly(m_parent, m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg", EType::Assembly));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
+    m_gizmos.emplace_back(new GLGizmoFin(m_parent, m_is_dark ? "toolbar_fin_dark.svg" : "toolbar_fin.svg", EType::Fin));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -1486,6 +1491,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Color Painting";
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
+    case GLGizmosManager::EType::Fin:
+        return _u8L("Fin");
     default:
         return "";
     }
