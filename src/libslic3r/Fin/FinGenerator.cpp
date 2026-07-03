@@ -110,6 +110,20 @@ std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Trans
     return g;
 }
 
+bool is_bed_rigid_delta(const Transform3d& delta, double tol)
+{
+    const Matrix3d r = delta.linear();
+    // Pure rotation: orthonormal (kills scale/skew) with det=+1 (kills mirroring).
+    if (!(r * r.transpose()).isApprox(Matrix3d::Identity(), tol))
+        return false;
+    if (r.determinant() < 0.0)
+        return false;
+    // Rotation axis must be vertical (Z maps to Z) and the bed must stay at z=0.
+    if (!r.col(2).isApprox(Vec3d::UnitZ(), tol))
+        return false;
+    return std::abs(delta.translation().z()) < tol;
+}
+
 } // namespace FinGeneratorInternal
 
 namespace {

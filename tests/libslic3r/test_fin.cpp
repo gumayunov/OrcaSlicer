@@ -2,6 +2,7 @@
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Fin/FinGenerator.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Utils.hpp"
@@ -1384,4 +1385,33 @@ TEST_CASE("fin: visual STL dump for manual inspection", "[fin-visual][.]")
     CHECK(std::filesystem::exists(fin_path));
     CHECK(std::filesystem::file_size(cube_path) > 0);
     CHECK(std::filesystem::file_size(fin_path) > 0);
+}
+
+TEST_CASE("fin: bed-rigid delta classifier", "[fin]")
+{
+    using FinGeneratorInternal::is_bed_rigid_delta;
+
+    // Shape-preserving deltas: identity, XY translation, Z rotation, their combo.
+    CHECK(is_bed_rigid_delta(Transform3d::Identity()));
+    CHECK(is_bed_rigid_delta(Geometry::translation_transform(Vec3d(12.5, -3.0, 0.0))));
+    CHECK(is_bed_rigid_delta(Geometry::rotation_transform(Vec3d(0.0, 0.0, 0.7))));
+    CHECK(is_bed_rigid_delta(Geometry::translation_transform(Vec3d(1.0, 2.0, 0.0))
+                             * Geometry::rotation_transform(Vec3d(0.0, 0.0, M_PI))));
+    // 180 deg about Z == diag(-1,-1,1): det=+1, must pass (it is NOT a mirror).
+    CHECK(is_bed_rigid_delta(Geometry::scale_transform(Vec3d(-1.0, -1.0, 1.0))));
+
+    // Silhouette-changing deltas: Z lift, tilt, scale, mirror, skew.
+    CHECK_FALSE(is_bed_rigid_delta(Geometry::translation_transform(Vec3d(0.0, 0.0, 0.5))));
+    CHECK_FALSE(is_bed_rigid_delta(Geometry::rotation_transform(Vec3d(0.3, 0.0, 0.0))));
+    CHECK_FALSE(is_bed_rigid_delta(Geometry::rotation_transform(Vec3d(0.0, 0.2, 0.0))));
+    CHECK_FALSE(is_bed_rigid_delta(Geometry::scale_transform(Vec3d(2.0, 2.0, 2.0))));
+    CHECK_FALSE(is_bed_rigid_delta(Geometry::scale_transform(Vec3d(-1.0, 1.0, 1.0)))); // mirror, det=-1
+    Transform3d skew = Transform3d::Identity();
+    skew(0, 1) = 0.3;
+    CHECK_FALSE(is_bed_rigid_delta(skew));
+
+    // Tolerance: numeric noise well below tol must not flip the verdict.
+    Transform3d noisy = Geometry::rotation_transform(Vec3d(0.0, 0.0, 1.1));
+    noisy.translation() = Vec3d(5.0, 6.0, 1e-9);
+    CHECK(is_bed_rigid_delta(noisy));
 }

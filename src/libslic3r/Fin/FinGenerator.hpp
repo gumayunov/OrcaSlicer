@@ -84,6 +84,13 @@ std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform
 // the caller's signal to fall back to defaults.
 std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed);
 
+// True when `delta` (a world-frame instance-matrix delta, M_now * M_cached^-1) preserves
+// the object's bed-frame silhouette: a no-reflection isometry that rotates only about the
+// vertical and does not lift off the bed. A cached bed-frame fin ghost stays exact under
+// such a delta -- render it with `delta` as the model matrix instead of regenerating
+// (design 01 §3). `tol` bounds both the orthonormality check and the Z-translation (mm).
+bool is_bed_rigid_delta(const Transform3d& delta, double tol = 1e-6);
+
 } // namespace FinGeneratorInternal
 
 } // namespace Slic3r
