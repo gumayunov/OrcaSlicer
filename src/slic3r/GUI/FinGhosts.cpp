@@ -127,6 +127,13 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
     // design 01 -- tune on the manual checkpoint if the ghost feels too laggy/too hot.
     static constexpr auto RegenInterval = std::chrono::milliseconds(200);
 
+    // Preset-derived generate_one_fin() inputs, baked into every ghost mesh: a print or
+    // printer preset switch changes them, which must invalidate the cache like any other
+    // generation input (exact compare below is fine -- the same value always comes from
+    // the same preset read).
+    const double layer_height = FinGhost::preview_layer_height();
+    const double line_width   = FinGhost::preview_line_width();
+
     for (auto& [key, entry] : m_entries)
         entry.visited = false;
 
@@ -152,16 +159,22 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
             // Order matters: before the first generation entry.to_bed is a meaningless
             // identity and the delta with it is garbage -- key_stale short-circuits that.
             const bool key_stale = !entry.generated || entry.fins != mo->fins
-                                || entry.volumes != volume_keys;
+                                || entry.volumes != volume_keys
+                                || entry.layer_height != layer_height
+                                || entry.line_width != line_width;
             Transform3d delta = to_bed * entry.to_bed.inverse();
             if (key_stale || !FinGeneratorInternal::is_bed_rigid_delta(delta)) {
                 const auto now = std::chrono::steady_clock::now();
                 if (now - entry.last_regen >= RegenInterval) {
-                    regenerate(entry, *mo, to_bed);
-                    entry.fins       = mo->fins;
-                    entry.volumes    = volume_keys;
+                    // Stamped before generating: if generation ever throws and the event
+                    // loop survives, retries stay throttled instead of firing every frame.
                     entry.last_regen = now;
-                    delta            = Transform3d::Identity();
+                    regenerate(entry, *mo, to_bed);
+                    entry.fins         = mo->fins;
+                    entry.volumes      = volume_keys;
+                    entry.layer_height = layer_height;
+                    entry.line_width   = line_width;
+                    delta              = Transform3d::Identity();
                 }
                 // else: keep drawing the stale ghost with the current (affine) delta
                 // below -- it visually sticks to the object; the exact shape catches

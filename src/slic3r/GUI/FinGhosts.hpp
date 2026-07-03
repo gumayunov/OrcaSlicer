@@ -53,7 +53,9 @@ class FinGhostsRenderer
 public:
     // Renders all ghosts. `skip_object` suppresses one object's ghosts entirely --
     // pass the Fin gizmo's target object while that gizmo is open (it draws its own
-    // live, possibly-unsaved preview); ObjectID() (invalid) to skip nothing.
+    // live, possibly-unsaved preview); ObjectID() (invalid) to skip nothing. Skipped
+    // objects' entries are GC'd while the gizmo is open, so closing it costs one
+    // immediate regen per instance -- intentional.
     void render(const Model& model, const ObjectID& skip_object);
 
 private:
@@ -62,7 +64,10 @@ private:
     {
         ObjectID    id;
         Transform3d matrix;
-        const void* mesh; // shared-mesh address: replacing a volume's mesh changes it
+        // Shared-mesh address: replacing a volume's mesh changes it. Address identity has
+        // a theoretical ABA window (freed+realloc'd at the same address => transiently
+        // stale ghost); never dereferenced, accepted.
+        const void* mesh;
         bool operator==(const VolumeKey& rhs) const
         {
             return id == rhs.id && matrix.matrix() == rhs.matrix.matrix() && mesh == rhs.mesh;
@@ -75,6 +80,8 @@ private:
         FinFeatures            fins;                                // snapshot of ModelObject::fins
         std::vector<VolumeKey> volumes;                             // MODEL_PART volumes only
         Transform3d            to_bed{ Transform3d::Identity() };   // instance matrix at generation time
+        double                 layer_height{ 0.0 };                 // preset-derived generate_one_fin() inputs
+        double                 line_width{ 0.0 };                   //   baked into the ghosts
         std::vector<std::unique_ptr<GLModel>> ghosts;               // one per enabled fin that produced geometry
         std::chrono::steady_clock::time_point last_regen{};         // epoch => "never" => first regen is immediate
         bool generated{ false };                                    // false until the first regeneration ran
