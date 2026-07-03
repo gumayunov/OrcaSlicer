@@ -462,7 +462,7 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     }
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
-    BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";
+    BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";
     if (mo->fins.empty())
         mo->fins.push_back(FinFeature{});
     mo->fins.front() = *fin_object;
@@ -482,7 +482,7 @@ void GLGizmoFin::remove_fin_from_model()
         return;
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove fin"), UndoRedo::SnapshotType::GizmoAction);
-    BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: took undo snapshot 'Remove fin', clearing fins";
+    BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot 'Remove fin', clearing fins";
     mo->fins.clear();
 
     wxGetApp().plater()->set_plater_dirty(true);
