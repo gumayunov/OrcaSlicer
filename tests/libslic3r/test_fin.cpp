@@ -1345,9 +1345,17 @@ TEST_CASE("fin: visual STL dump for manual inspection", "[fin-visual][.]")
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     // height=25 (taller than the 10mm default) so the fin reads clearly
-    // against the 40mm-tall cube; length/thickness/conn_step/conn_gap stay
-    // at their defaults (8, 1.2, 4, 1).
+    // against the 40mm-tall cube; thickness/conn_step/conn_gap stay at
+    // their defaults (1.2, 4, 1).
     f.height = 25.0;
+    // Window semantics (design doc §15): the anchor sits at the cube's own center along u
+    // (like the other §15-updated tests, e.g. "fin: wall mesh is a closed, outward-facing
+    // solid"), so the section's far-side surface is at local u=10 (half-width) and the
+    // window's near edge (past the default 1mm conn_gap) is at u=11. The pre-§15 default
+    // length (8) now lands the whole window inside the part+gap -> EMPTY mesh (this is the
+    // T00-01-06 fixture the T00-05 review flagged as stale). Bumped to 16, same value used
+    // by the other updated tests, for a real 5mm-wide wall.
+    f.length = 16.0;
 
     double layer_height = 0.2, line_width = 0.45;
     TriangleMesh fin = generate_one_fin(cube, f, layer_height, line_width);
