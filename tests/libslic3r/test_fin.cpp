@@ -3,8 +3,12 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Fin/FinGenerator.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <cereal/archives/binary.hpp>
+
+#include <boost/filesystem/operations.hpp>
 
 #include <cstdlib>
 #include <filesystem>
@@ -79,6 +83,131 @@ TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
     CHECK_THAT(dst.conn_step, WithinAbs(3.0, 1e-9));
     CHECK_THAT(dst.conn_gap, WithinAbs(1.25, 1e-9));
     CHECK_FALSE(dst.enabled);
+}
+
+// --- FinFeature: .3mf persistence (T00-03-01) -------------------------------
+
+namespace {
+
+// Round-trips `src` through a real bbs_3mf save+load cycle (SaveStrategy::Silence
+// skips the backup-path side effects a full app export would otherwise trigger).
+// Returns true iff both the store and the load succeeded.
+bool roundtrip_bbs_3mf(Model& src, Model& dst, const std::string& path)
+{
+    // store_bbs_3mf() stages a few scratch config files under a "backup" dir
+    // rooted at temporary_dir(); in a fresh test process that global is unset
+    // (it's normally set once by app startup), which resolves to the
+    // filesystem root. Point it at the OS temp dir before saving.
+    if (temporary_dir().empty())
+        set_temporary_dir(std::filesystem::temp_directory_path().string());
+
+    DynamicPrintConfig store_config;
+    StoreParams        store_params;
+    store_params.path     = path.c_str();
+    store_params.model    = &src;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    if (!store_bbs_3mf(store_params))
+        return false;
+
+    DynamicPrintConfig        load_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plate_data_list;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    bool load_ok = load_bbs_3mf(path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
+                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
+                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(plate_data_list);
+    return load_ok;
+}
+
+} // namespace
+
+TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
+{
+    Model        m;
+    ModelObject* o = m.add_object();
+    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
+    o->add_instance();
+
+    // Non-default values on every field, including the Vec2d and the bool, so
+    // the roundtrip actually exercises all of FinFeature's persisted state.
+    FinFeature f1;
+    f1.anchor_xy = Vec2d(3.25, -1.75);
+    f1.z_angle   = 1.23;
+    f1.height    = 17.5;
+    f1.length    = 9.25;
+    f1.thickness = 1.4;
+    f1.conn_step = 5.5;
+    f1.conn_gap  = 0.9;
+    f1.enabled   = true;
+    o->fins.push_back(f1);
+
+    FinFeature f2;
+    f2.anchor_xy = Vec2d(-4.5, 6.125);
+    f2.z_angle   = -2.5;
+    f2.height    = 8.0;
+    f2.length    = 3.0;
+    f2.thickness = 0.8;
+    f2.conn_step = 2.5;
+    f2.conn_gap  = 1.75;
+    f2.enabled   = false;
+    o->fins.push_back(f2);
+
+    std::string path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_roundtrip.3mf";
+
+    Model dst;
+    bool  ok = roundtrip_bbs_3mf(m, dst, path);
+    boost::filesystem::remove(path);
+    REQUIRE(ok);
+
+    REQUIRE(dst.objects.size() == 1);
+    REQUIRE(dst.objects.front()->fins.size() == 2);
+
+    const FinFeature& r1 = dst.objects.front()->fins[0];
+    CHECK_THAT(r1.anchor_xy.x(), WithinAbs(f1.anchor_xy.x(), 1e-6));
+    CHECK_THAT(r1.anchor_xy.y(), WithinAbs(f1.anchor_xy.y(), 1e-6));
+    CHECK_THAT(r1.z_angle,       WithinAbs(f1.z_angle, 1e-6));
+    CHECK_THAT(r1.height,        WithinAbs(f1.height, 1e-6));
+    CHECK_THAT(r1.length,        WithinAbs(f1.length, 1e-6));
+    CHECK_THAT(r1.thickness,     WithinAbs(f1.thickness, 1e-6));
+    CHECK_THAT(r1.conn_step,     WithinAbs(f1.conn_step, 1e-6));
+    CHECK_THAT(r1.conn_gap,      WithinAbs(f1.conn_gap, 1e-6));
+    CHECK(r1.enabled == f1.enabled);
+
+    const FinFeature& r2 = dst.objects.front()->fins[1];
+    CHECK_THAT(r2.anchor_xy.x(), WithinAbs(f2.anchor_xy.x(), 1e-6));
+    CHECK_THAT(r2.anchor_xy.y(), WithinAbs(f2.anchor_xy.y(), 1e-6));
+    CHECK_THAT(r2.z_angle,       WithinAbs(f2.z_angle, 1e-6));
+    CHECK_THAT(r2.height,        WithinAbs(f2.height, 1e-6));
+    CHECK_THAT(r2.length,        WithinAbs(f2.length, 1e-6));
+    CHECK_THAT(r2.thickness,     WithinAbs(f2.thickness, 1e-6));
+    CHECK_THAT(r2.conn_step,     WithinAbs(f2.conn_step, 1e-6));
+    CHECK_THAT(r2.conn_gap,      WithinAbs(f2.conn_gap, 1e-6));
+    CHECK(r2.enabled == f2.enabled);
+}
+
+TEST_CASE("fin: loading a 3mf without fins is fine", "[fin]")
+{
+    // No fins on the object at all: the writer must skip fin_information.xml
+    // entirely (mirrors an old project saved before this feature existed),
+    // and the reader must not choke on its absence.
+    Model        m;
+    ModelObject* o = m.add_object();
+    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
+    o->add_instance();
+
+    std::string path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_none.3mf";
+
+    Model dst;
+    bool  ok = roundtrip_bbs_3mf(m, dst, path);
+    boost::filesystem::remove(path);
+    REQUIRE(ok);
+
+    REQUIRE(dst.objects.size() == 1);
+    CHECK(dst.objects.front()->fins.empty());
 }
 
 // --- FinGenerator: plane-frame <-> bed-frame -------------------------------
