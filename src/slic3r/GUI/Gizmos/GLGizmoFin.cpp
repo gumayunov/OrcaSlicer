@@ -5,12 +5,12 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
+#include "slic3r/GUI/FinGhosts.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp" // FinFeature, ModelObject
 #include "libslic3r/Fin/FinGenerator.hpp"
-#include "libslic3r/Flow.hpp"
 
 #include <glad/gl.h>
 #include <wx/utils.h>
@@ -32,8 +32,6 @@ static constexpr unsigned int RotationRingSegments = 48;
 // GLGizmoCut3D's CUT_PLANE_DEF_COLOR / CUT_PLANE_ERR_COLOR switch in render_cut_plane()).
 static const ColorRGBA PlaneFillColor        = ColorRGBA(0.9f, 0.9f, 0.9f, 0.45f);
 static const ColorRGBA PlaneFillInvalidColor = ColorRGBA(1.0f, 0.8f, 0.8f, 0.5f);
-// Ghost preview mesh color: ColorRGBA::ORANGE() at preview alpha.
-static const ColorRGBA GhostColor = ColorRGBA(0.923f, 0.504f, 0.264f, 0.45f);
 
 GLGizmoFin::GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -210,55 +208,10 @@ double GLGizmoFin::rotation_ring_radius() const
     return std::max(0.5 * m_length, MinRotationRingRadius);
 }
 
-// The edited print preset's layer height, or `fallback` when no usable print config is
-// loaded (e.g. running headless). The two call sites below need different fallbacks: a UI
-// drag-snap increment (m_snap_step) vs. a physically plausible layer height (0.2mm) to
-// build preview geometry with.
-double GLGizmoFin::preset_layer_height(double fallback) const
-{
-    if (wxGetApp().preset_bundle != nullptr) {
-        const double layer_height = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
-        if (layer_height > 0.0)
-            return layer_height;
-    }
-    return fallback;
-}
-
 double GLGizmoFin::get_layer_height_snap_step() const
 {
     // No print config available -- fall back to a plain mm snap.
-    return preset_layer_height(m_snap_step);
-}
-
-// Layer height for the ghost-preview mesh (connector tab thickness, generate_one_fin()'s
-// `layer_height` argument).
-double GLGizmoFin::resolve_preview_layer_height() const
-{
-    return preset_layer_height(0.2); // mm -- generic default, only reached without a loaded print preset
-}
-
-// Extrusion line width for the ghost-preview mesh (fin wall / connector tabs).
-// Preview fidelity is secondary (per the plan): this resolves the shared "line_width" print
-// option via Flow::extrusion_width(), the same utility Flow::new_from_config_width() (and so
-// PrintObjectSlice.cpp's TransientFinGuard, at slice time) ultimately falls back to for a
-// zero-valued *_line_width option -- it already implements the "0 -> nozzle-diameter-based
-// auto width" fallback (Flow::auto_extrusion_width(), 1.125x nozzle diameter for frPerimeter).
-// Unlike TransientFinGuard, this does not walk the inner_wall_line_width -> line_width chain
-// first, since no PrintRegion is available here; that only matters for exact width, not shape.
-double GLGizmoFin::resolve_preview_line_width() const
-{
-    if (wxGetApp().preset_bundle != nullptr) {
-        try {
-            const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
-            const double             width        = Flow::extrusion_width("line_width", full_config, 0);
-            if (width > 0.0)
-                return width;
-        } catch (const std::exception&) {
-            // Missing nozzle_diameter or similar (e.g. no printer preset loaded) -- fall
-            // through to the generic default below.
-        }
-    }
-    return 0.4; // mm -- generic default, only reached without a usable print/printer config
+    return FinGhost::preset_layer_height(m_snap_step);
 }
 
 // True when m_object_solid_bed no longer reflects the scene: a different object/instance is
@@ -382,14 +335,7 @@ void GLGizmoFin::update_ghost_preview()
     fin_bed_frame.conn_gap  = m_conn_gap;
     fin_bed_frame.enabled   = true;
 
-    const TriangleMesh mesh = generate_one_fin(m_object_solid_bed, fin_bed_frame, resolve_preview_layer_height(), resolve_preview_line_width());
-
-    m_ghost_model.reset();
-    m_ghost_valid = !mesh.empty();
-    if (m_ghost_valid) {
-        m_ghost_model.init_from(mesh);
-        m_ghost_model.set_color(GhostColor);
-    }
+    m_ghost_valid = FinGhost::build_ghost(m_ghost_model, m_object_solid_bed, fin_bed_frame);
 }
 
 // --- Persistence (T00-04-05) -------------------------------------------------
@@ -575,36 +521,10 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
 // Drawn after the plane, semi-transparent, depth-tested against the rest of the scene.
 void GLGizmoFin::render_ghost()
 {
-    // NOT is_empty(): GLModel frees its CPU-side geometry after the first render() uploads it
-    // to the GPU (send_to_gpu()), which flips is_empty() to true -- gating on it would draw the
-    // ghost exactly once and then skip it on every subsequent frame. is_initialized() keeps
-    // reporting the (GPU-resident) vertex/index counts, so it stays true for the model's lifetime.
-    if (!m_ghost_valid || !m_ghost_model.is_initialized())
+    if (!m_ghost_valid)
         return;
-
-    GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
-    if (shader == nullptr)
-        return;
-
-    // Depth test is already on (enabled at the top of on_render(), never disabled since:
-    // render_plane() re-enables it too and restores everything else it touches).
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-
-    shader->start_using();
-
-    const Camera& camera = wxGetApp().plater()->get_camera();
-    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-    // The mesh is already expressed in the bed/world frame (generate_one_fin()'s contract),
-    // and the gizmo's world frame IS the bed frame, so no additional model transform is needed.
-    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
-    shader->set_uniform("emission_factor", 0.2f);
-
-    m_ghost_model.render();
-
-    shader->stop_using();
-
-    glsafe(::glDisable(GL_BLEND));
+    // The gizmo's ghost mesh is already in the bed frame -- no extra model transform.
+    FinGhost::render(m_ghost_model, Transform3d::Identity());
 }
 
 void GLGizmoFin::render_rotation_ring()

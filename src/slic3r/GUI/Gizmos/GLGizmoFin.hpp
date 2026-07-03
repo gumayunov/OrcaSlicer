@@ -128,17 +128,14 @@ private:
 
     Transform3d plane_matrix() const;
     double      rotation_ring_radius() const;
-    double      preset_layer_height(double fallback) const;
     double      get_layer_height_snap_step() const;
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
 
     // Ghost preview (T00-04-04).
-    bool   solid_cache_stale() const;
-    void   rebuild_object_solid();
-    void   update_ghost_preview();
-    void   render_ghost();
-    double resolve_preview_layer_height() const;
-    double resolve_preview_line_width() const;
+    bool solid_cache_stale() const;
+    void rebuild_object_solid();
+    void update_ghost_preview();
+    void render_ghost();
 
     // ImGui side panel (T00-04-03).
     void init_input_window_layout();
