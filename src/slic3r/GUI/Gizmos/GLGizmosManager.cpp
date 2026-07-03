@@ -1492,7 +1492,7 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
     case GLGizmosManager::EType::FuzzySkin:
         return "Fuzzy Skin Painting";
     case GLGizmosManager::EType::Fin:
-        return _u8L("Fin");
+        return "Fin";
     default:
         return "";
     }
