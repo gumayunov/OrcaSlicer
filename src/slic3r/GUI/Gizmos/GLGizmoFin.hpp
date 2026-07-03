@@ -102,6 +102,7 @@ public:
     GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
 
     bool on_mouse(const wxMouseEvent& mouse_event) override;
+    void data_changed(bool is_serializing) override;
 
 protected:
     bool        on_init() override;

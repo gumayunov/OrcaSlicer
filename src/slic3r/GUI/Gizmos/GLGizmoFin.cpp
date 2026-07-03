@@ -64,6 +64,32 @@ void GLGizmoFin::on_set_state()
     }
 }
 
+// Called by GLGizmosManager::update_data() -- notably from update_after_undo_redo() with
+// is_serializing == true, right after an undo/redo rolled the Model (incl. ModelObject::fins)
+// back under this open gizmo. The gizmo's plane/params are a cached VIEW of fins[0]: without
+// this reload the panel and ghost would keep showing the pre-undo state (undo looks like a
+// no-op), and worse, the next commit gesture would write that stale state back -- silently
+// re-doing what the user just undid. The model is the source of truth, so nothing is
+// serialized into snapshots gizmo-side (on_save/on_load stay the base no-ops, unlike
+// GLGizmoCut3D whose plane does NOT live in the model and therefore keeps m_ar_* archive
+// copies to serialize); everything is re-derived from the restored model here instead.
+// Ordering is safe: Plater::priv::update_after_undo_redo() restores the deserialized GUI
+// selection BEFORE delegating to GLGizmosManager::update_after_undo_redo(), so the
+// selection-derived lookups (selected_model_object() etc.) see valid indices.
+// Non-serializing update_data() calls (open_gizmo, sidebar object manipulation, ...) are
+// deliberately ignored: same-object geometry changes while the gizmo stays open are handled
+// per frame by solid_cache_stale() and must NOT reload plane/params (see the comment in
+// update_ghost_preview()).
+void GLGizmoFin::data_changed(bool is_serializing)
+{
+    if (!is_serializing)
+        return;
+    BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: undo/redo restore detected -- reloading gizmo state from ModelObject::fins";
+    m_drag_ref_captured = false; // no in-flight gesture reference survives an undo/redo jump
+    init_from_selection();
+    rebuild_object_solid();
+}
+
 // T00-04-05: loads the selected object's existing fin (fins[0] -- single-fin UX for now) when
 // there is one, converting object-local -> world via fin_object_to_bed() (the exact inverse of
 // apply_to_model()'s world -> object-local conversion; see FinGenerator.hpp). Falls back to
@@ -442,6 +468,7 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     }
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
+    BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";
     if (mo->fins.empty())
         mo->fins.push_back(FinFeature{});
     mo->fins.front() = *fin_object;
@@ -461,6 +488,7 @@ void GLGizmoFin::remove_fin_from_model()
         return;
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove fin"), UndoRedo::SnapshotType::GizmoAction);
+    BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: took undo snapshot 'Remove fin', clearing fins";
     mo->fins.clear();
 
     wxGetApp().plater()->set_plater_dirty(true);
