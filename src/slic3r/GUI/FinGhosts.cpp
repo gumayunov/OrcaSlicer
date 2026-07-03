@@ -121,21 +121,10 @@ void render(GLModel& ghost, const Transform3d& model_matrix)
 
 void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
 {
-    // Regeneration cadence while a transform is in flux (mid-drag tilt/scale produces a
-    // non-rigid delta every frame). An isolated change regenerates immediately: its
-    // last_regen is at least one interval in the past by then. Starting value per
-    // design 01 -- tune on the manual checkpoint if the ghost feels too laggy/too hot.
-    static constexpr auto RegenInterval = std::chrono::milliseconds(200);
-
-    // Preset-derived generate_one_fin() inputs, baked into every ghost mesh: a print or
-    // printer preset switch changes them, which must invalidate the cache like any other
-    // generation input (exact compare below is fine -- the same value always comes from
-    // the same preset read).
-    const double layer_height = FinGhost::preview_layer_height();
-    const double line_width   = FinGhost::preview_line_width();
-
     for (auto& [key, entry] : m_entries)
         entry.visited = false;
+
+    bool params_refreshed = false; // at most one preset refresh per render() call
 
     for (const ModelObject* mo : model.objects) {
         if (mo == nullptr || mo->id() == skip_object)
@@ -143,6 +132,20 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
         if (std::none_of(mo->fins.begin(), mo->fins.end(),
                          [](const FinFeature& f) { return f.enabled; }))
             continue;
+
+        // Preset-derived inputs are baked into every ghost mesh: a print/printer preset
+        // switch changes them, which must invalidate the cache like any other generation
+        // input (exact compare in key_stale is fine -- the same value always comes from
+        // the same preset read). Resolved lazily -- only when a fin-bearing object exists
+        // and at most once per RegenInterval -- see m_layer_height's declaration.
+        if (!params_refreshed) {
+            params_refreshed = true;
+            if (const auto now = std::chrono::steady_clock::now(); now - m_params_checked >= RegenInterval) {
+                m_params_checked = now;
+                m_layer_height   = FinGhost::preview_layer_height();
+                m_line_width     = FinGhost::preview_line_width();
+            }
+        }
 
         // Shared by all instances of this object; the instance transform is the only
         // per-instance key component.
@@ -160,8 +163,8 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
             // identity and the delta with it is garbage -- key_stale short-circuits that.
             const bool key_stale = !entry.generated || entry.fins != mo->fins
                                 || entry.volumes != volume_keys
-                                || entry.layer_height != layer_height
-                                || entry.line_width != line_width;
+                                || entry.layer_height != m_layer_height
+                                || entry.line_width != m_line_width;
             Transform3d delta = to_bed * entry.to_bed.inverse();
             if (key_stale || !FinGeneratorInternal::is_bed_rigid_delta(delta)) {
                 const auto now = std::chrono::steady_clock::now();
@@ -172,8 +175,8 @@ void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
                     regenerate(entry, *mo, to_bed);
                     entry.fins         = mo->fins;
                     entry.volumes      = volume_keys;
-                    entry.layer_height = layer_height;
-                    entry.line_width   = line_width;
+                    entry.layer_height = m_layer_height;
+                    entry.line_width   = m_line_width;
                     delta              = Transform3d::Identity();
                 }
                 // else: keep drawing the stale ghost with the current (affine) delta

@@ -90,10 +90,26 @@ private:
 
     void regenerate(Entry& entry, const ModelObject& object, const Transform3d& to_bed);
 
+    // Regeneration cadence while a transform is in flux (mid-drag tilt/scale produces a
+    // non-rigid delta every frame). An isolated change regenerates immediately: its
+    // last_regen is at least one interval in the past by then. Also paces the preset
+    // lookups below. Starting value per design 01 -- tune on the manual checkpoint if
+    // the ghost feels too laggy/too hot.
+    static constexpr auto RegenInterval = std::chrono::milliseconds(200);
+
     // (ModelObject id, ModelInstance id) -> entry. Instance IDs (not indices) keep the
     // cache stable across instance list reordering; entries of deleted objects/instances
     // are garbage-collected via the `visited` mark on every render.
     std::map<std::pair<size_t, size_t>, Entry> m_entries;
+
+    // Cached preset-derived generate_one_fin() inputs; re-resolved at most once per
+    // RegenInterval and only when a fin-bearing object exists, because
+    // preview_line_width() builds the full preset config (expensive per frame). A preset
+    // switch thus converges within ~2x RegenInterval worst case (one interval to notice
+    // the change, one regen throttle) -- acceptable.
+    double m_layer_height{ 0.0 };
+    double m_line_width{ 0.0 };
+    std::chrono::steady_clock::time_point m_params_checked{};
 };
 
 } // namespace GUI
