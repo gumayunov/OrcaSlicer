@@ -2641,7 +2641,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             std::istringstream iss(buffer); // wrap returned xml to istringstream
             pt::ptree fins_tree;
-            pt::read_xml(iss, fins_tree);
+            try {
+                pt::read_xml(iss, fins_tree);
+            } catch (const std::exception& e) {
+                // Corrupt/truncated fin_information.xml must not abort the WHOLE project load
+                // (T00-03-01 review note, docs/designs/00-vertical-fin/progress.md): this is one
+                // of four unguarded pt::read_xml() call sites in this file (the cut/brim/config
+                // readers share the same systemic risk) -- fixing all four is a cross-cutting
+                // change out of this feature's scope, so only OUR extractor is hardened here.
+                // Skip fins gracefully; the rest of the project (model, other metadata) still loads.
+                BOOST_LOG_TRIVIAL(warning) << "_BBS_3MF_Importer: failed to parse " << FIN_INFORMATION_FILE
+                                            << ": " << e.what() << " -- skipping fins";
+                return;
+            }
 
             boost::optional<pt::ptree&> objects_tree = fins_tree.get_child_optional("fins");
             if (!objects_tree)

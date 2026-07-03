@@ -5,10 +5,13 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/miniz_extension.hpp"
 
 #include <cereal/archives/binary.hpp>
 
 #include <boost/filesystem/operations.hpp>
+
+#include <miniz.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -210,6 +213,83 @@ TEST_CASE("fin: loading a 3mf without fins is fine", "[fin]")
 
     REQUIRE(dst.objects.size() == 1);
     CHECK(dst.objects.front()->fins.empty());
+}
+
+TEST_CASE("fin: corrupt fin_information.xml in a 3mf does not abort project load", "[fin]")
+{
+    // Cross-cutting robustness note (T00-03-01 review, docs/designs/00-vertical-fin/progress.md):
+    // bbs_3mf.cpp has 4 unguarded pt::read_xml() call sites (the cut/brim/config-info readers,
+    // plus ours) -- ALL of them throw an uncaught xml_parser_error on truncated/corrupt XML,
+    // which aborts the WHOLE project load, not just that one piece of metadata. This feature's
+    // fix is scoped to only our own extractor (_extract_fin_information_from_archive): a
+    // try/catch around its read_xml() logs a warning and skips fins gracefully, leaving the
+    // other three sites' systemic risk for upstream (fixing those would change cut/brim
+    // behavior, out of this feature's scope). This test pins the graceful-skip behavior
+    // end-to-end through the real load_bbs_3mf() entry point.
+    Model        m;
+    ModelObject* o = m.add_object();
+    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
+    o->add_instance();
+    o->fins.push_back(FinFeature{});
+
+    if (temporary_dir().empty())
+        set_temporary_dir(std::filesystem::temp_directory_path().string());
+
+    std::string good_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_corrupt_source.3mf";
+    std::string bad_path  = std::string(TEST_DATA_DIR) + "/test_3mf/fin_corrupt.3mf";
+
+    DynamicPrintConfig store_config;
+    StoreParams        store_params;
+    store_params.path     = good_path.c_str();
+    store_params.model    = &m;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    // Copy every zip entry from the known-good archive through verbatim, EXCEPT
+    // fin_information.xml, which is replaced with truncated/unterminated XML -- the minimal way
+    // to reach the real load_bbs_3mf() code path (hand-building a whole project archive would
+    // just re-test store_bbs_3mf() instead of the corrupt-input case).
+    {
+        mz_zip_archive reader{};
+        REQUIRE(open_zip_reader(&reader, good_path));
+        mz_zip_archive writer{};
+        REQUIRE(open_zip_writer(&writer, bad_path));
+
+        const mz_uint n_entries = mz_zip_reader_get_num_files(&reader);
+        for (mz_uint i = 0; i < n_entries; ++i) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
+            if (std::string(stat.m_filename) == "Metadata/fin_information.xml") {
+                static const char corrupt[] = "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin ";
+                REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, corrupt, sizeof(corrupt) - 1,
+                                               MZ_DEFAULT_COMPRESSION));
+            } else {
+                REQUIRE(mz_zip_writer_add_from_zip_reader(&writer, &reader, i));
+            }
+        }
+        REQUIRE(mz_zip_writer_finalize_archive(&writer));
+        REQUIRE(close_zip_writer(&writer));
+        REQUIRE(close_zip_reader(&reader));
+    }
+    boost::filesystem::remove(good_path);
+
+    DynamicPrintConfig        load_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plate_data_list;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    Model                     dst;
+    bool load_ok = load_bbs_3mf(bad_path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
+                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
+                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(plate_data_list);
+    boost::filesystem::remove(bad_path);
+
+    REQUIRE(load_ok); // must not throw / abort the whole load over one corrupt metadata file
+    REQUIRE(dst.objects.size() == 1);
+    CHECK(dst.objects.front()->fins.empty()); // fins skipped gracefully; rest of the project intact
 }
 
 // --- FinGenerator: plane-frame <-> bed-frame -------------------------------
