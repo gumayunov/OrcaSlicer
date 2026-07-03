@@ -20,8 +20,7 @@ namespace GUI {
 
 static constexpr double MinFinDimension = 0.5; // mm -- the plane may not collapse to zero size
 static constexpr double MinFinParamValue = 0.1; // mm -- thickness / connector step / gap must stay positive and printable
-static constexpr double MinRotationRingRadius = 6.0;  // mm
-static constexpr double MaxRotationRingRadius = 15.0; // mm
+static constexpr double MinRotationRingRadius = 7.5; // mm -- min ring diameter 15mm
 static constexpr unsigned int RotationRingSegments = 48;
 
 GLGizmoFin::GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
@@ -117,10 +116,11 @@ Transform3d GLGizmoFin::plane_matrix() const
 
 double GLGizmoFin::rotation_ring_radius() const
 {
+    // Ring diameter follows the fin's horizontal reach (m_length), never below 15mm.
     // Intentionally independent of m_height (which now defaults to the object's
     // height): the ring must stay compact, near the plane root, so it is always
     // in view when the user is looking at the fin base.
-    return std::clamp(0.75 * m_length, MinRotationRingRadius, MaxRotationRingRadius);
+    return std::max(0.5 * m_length, MinRotationRingRadius);
 }
 
 double GLGizmoFin::get_layer_height_snap_step() const
