@@ -77,14 +77,18 @@ class GLGizmoFin : public GLGizmoBase
     // plane/params, rendered semi-transparent over the plane. Two independent caches, each
     // rebuilt only when its own inputs change (never per render frame):
     //  - m_object_solid_bed: the selected instance's MODEL_PART volumes, merged in the world/bed
-    //    frame. Depends only on WHICH object/instance is selected (and its geometry), not on the
-    //    plane -- moving/rotating/resizing the plane must not touch this.
+    //    frame. Depends on WHICH object/instance is selected, WHERE it stands (its instance
+    //    transform) and its volume set -- all snapshotted below so solid_cache_stale() can detect
+    //    changes per frame cheaply. Not on the plane: moving/rotating/resizing the plane must not
+    //    touch this.
     //  - m_ghost_model / m_ghost_valid: generate_one_fin()'s result for the solid above and the
     //    current plane/params. Rebuilt on drag-end and on ImGui parameter edits (m_ghost_dirty),
     //    plus whenever the solid itself was just rebuilt.
     indexed_triangle_set m_object_solid_bed;
     int                  m_solid_object_idx{ -1 };   // Selection::get_object_idx() the solid above was built from
     int                  m_solid_instance_idx{ -1 }; // Selection::get_instance_idx(), ditto
+    Transform3d          m_solid_instance_matrix{ Transform3d::Identity() }; // instance world transform the solid was built under
+    size_t               m_solid_volume_count{ 0 };  // ModelObject::volumes.size() at solid-build time (add/delete detection)
     bool                 m_ghost_dirty{ true };      // true => update_ghost_preview() must rebuild m_ghost_model
     bool                 m_ghost_valid{ true };      // false => last generate_one_fin() was empty (plane misses the solid)
     GLModel              m_ghost_model;
@@ -122,6 +126,7 @@ private:
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
 
     // Ghost preview (T00-04-04).
+    bool   solid_cache_stale() const;
     void   rebuild_object_solid();
     void   update_ghost_preview();
     void   render_ghost();

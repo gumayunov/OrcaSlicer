@@ -210,18 +210,48 @@ double GLGizmoFin::resolve_preview_line_width() const
     return 0.4; // mm -- generic default, only reached without a usable print/printer config
 }
 
-// Rebuilds m_object_solid_bed from the current selection: the selected instance's MODEL_PART
-// volumes, merged into the world/bed frame (the gizmo's world frame IS the bed frame -- see
-// the class doc comment). Cheap object/instance-idx bookkeeping so update_ghost_preview() can
-// tell whether this actually needs to run again; the mesh assembly/merge itself is not free,
-// so this must NOT run every render frame -- only on activation (on_set_state()) and when the
-// selected object/instance changes (the defensive check in update_ghost_preview()).
-void GLGizmoFin::rebuild_object_solid()
+// True when m_object_solid_bed no longer reflects the scene: a different object/instance is
+// selected, the instance's world transform changed (move/rotate/scale -- also reachable while
+// this gizmo stays open, e.g. via the sidebar object-manipulation fields), or MODEL_PART
+// volumes were added/removed. Called every render frame -- everything here is O(1) (the matrix
+// comparison is 16 doubles). Volume-LOCAL edits (a part's own transform/mesh changing without
+// the volume count moving) are not detectable this way -- ModelObject carries no change
+// timestamp (ObjectBase::timestamp() is a constant 0) -- but those require a volume
+// sub-selection, which deactivates this gizmo (on_is_activable()), and reactivation rebuilds
+// the solid unconditionally (on_set_state()).
+bool GLGizmoFin::solid_cache_stale() const
 {
     const Selection& selection = m_parent.get_selection();
-    m_solid_object_idx   = selection.get_object_idx();
-    m_solid_instance_idx = selection.get_instance_idx();
-    m_object_solid_bed   = indexed_triangle_set();
+    if (selection.get_object_idx() != m_solid_object_idx || selection.get_instance_idx() != m_solid_instance_idx)
+        return true;
+    if (m_solid_object_idx < 0 || m_solid_instance_idx < 0)
+        return false; // nothing selected and nothing cached -- a rebuild would change nothing
+
+    const ModelObjectPtrs& objects = wxGetApp().plater()->model().objects;
+    if (size_t(m_solid_object_idx) >= objects.size())
+        return false; // lookup would fail inside rebuild_object_solid() too -- don't rebuild-loop
+    const ModelObject* mo = objects[m_solid_object_idx];
+    if (mo == nullptr || size_t(m_solid_instance_idx) >= mo->instances.size())
+        return false;
+
+    return mo->volumes.size() != m_solid_volume_count
+        || mo->instances[m_solid_instance_idx]->get_matrix().matrix() != m_solid_instance_matrix.matrix();
+}
+
+// Rebuilds m_object_solid_bed from the current selection: the selected instance's MODEL_PART
+// volumes, merged into the world/bed frame (the gizmo's world frame IS the bed frame -- see
+// the class doc comment). Snapshots the cache key (idxs, instance transform, volume count) so
+// solid_cache_stale() can tell whether this actually needs to run again; the mesh assembly/
+// merge itself is not free, so this must NOT run every render frame -- only on activation
+// (on_set_state()) and when solid_cache_stale() fires in update_ghost_preview().
+void GLGizmoFin::rebuild_object_solid()
+{
+    const Selection& selection  = m_parent.get_selection();
+    m_solid_object_idx      = selection.get_object_idx();
+    m_solid_instance_idx    = selection.get_instance_idx();
+    m_solid_instance_matrix = Transform3d::Identity();
+    m_solid_volume_count    = 0;
+    m_object_solid_bed      = indexed_triangle_set();
     // The solid just changed (cleared above; possibly refilled below) -- any cached ghost mesh
     // is stale either way. Set before the early returns, so they cannot leave a ghost that was
     // built against a solid that no longer exists on screen (update_ghost_preview() against the
@@ -245,6 +275,8 @@ void GLGizmoFin::rebuild_object_solid()
     // the gizmo has no PrintObject, and doesn't need one since its world frame already is the
     // bed frame.
     const Transform3d to_bed = mo->instances[m_solid_instance_idx]->get_matrix();
+    m_solid_instance_matrix  = to_bed;
+    m_solid_volume_count     = mo->volumes.size();
     m_object_solid_bed       = FinGeneratorInternal::object_solid_bed(*mo, to_bed);
 }
 
@@ -254,9 +286,12 @@ void GLGizmoFin::rebuild_object_solid()
 // (on_render_input_window()), and rebuild_object_solid() (the solid itself changed).
 void GLGizmoFin::update_ghost_preview()
 {
-    const Selection& selection = m_parent.get_selection();
-    if (selection.get_object_idx() != m_solid_object_idx || selection.get_instance_idx() != m_solid_instance_idx)
-        rebuild_object_solid(); // defensive: selection changed under us without an on_set_state() cycle
+    // Selection changed under us without an on_set_state() cycle, or the model itself was
+    // moved/rotated/scaled or got volumes added/removed while this gizmo stayed open (e.g.
+    // via the sidebar fields) -- the cached bed-frame solid describes the OLD placement, so
+    // re-derive it (which also marks the ghost dirty for regeneration below).
+    if (solid_cache_stale())
+        rebuild_object_solid();
 
     if (!m_ghost_dirty)
         return;
