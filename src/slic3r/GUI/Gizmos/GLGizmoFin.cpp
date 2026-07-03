@@ -366,7 +366,11 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
 // Drawn after the plane, semi-transparent, depth-tested against the rest of the scene.
 void GLGizmoFin::render_ghost()
 {
-    if (!m_ghost_valid || m_ghost_model.is_empty())
+    // NOT is_empty(): GLModel frees its CPU-side geometry after the first render() uploads it
+    // to the GPU (send_to_gpu()), which flips is_empty() to true -- gating on it would draw the
+    // ghost exactly once and then skip it on every subsequent frame. is_initialized() keeps
+    // reporting the (GPU-resident) vertex/index counts, so it stays true for the model's lifetime.
+    if (!m_ghost_valid || !m_ghost_model.is_initialized())
         return;
 
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
