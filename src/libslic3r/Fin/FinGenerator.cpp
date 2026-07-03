@@ -15,17 +15,19 @@ namespace Slic3r {
 
 namespace FinGeneratorInternal {
 
-Transform3d plane_to_bed(const FinFeature& f)
+Transform3d plane_to_bed(const Vec2d& anchor_xy, double z_angle)
 {
     Transform3d m = Transform3d::Identity();
-    Matrix3d    R;                                                        // columns: u, w, n
-    R.col(0) = Vec3d(-std::sin(f.z_angle), std::cos(f.z_angle), 0.);      // u
-    R.col(1) = Vec3d(0., 0., 1.);                                         // w (= Z)
-    R.col(2) = Vec3d(std::cos(f.z_angle), std::sin(f.z_angle), 0.);       // n
+    Matrix3d    R;                                                  // columns: u, w, n
+    R.col(0) = Vec3d(-std::sin(z_angle), std::cos(z_angle), 0.);    // u
+    R.col(1) = Vec3d(0., 0., 1.);                                   // w (= Z)
+    R.col(2) = Vec3d(std::cos(z_angle), std::sin(z_angle), 0.);     // n
     m.linear()      = R;
-    m.translation() = Vec3d(f.anchor_xy.x(), f.anchor_xy.y(), 0.);
+    m.translation() = Vec3d(anchor_xy.x(), anchor_xy.y(), 0.);
     return m;
 }
+
+Transform3d plane_to_bed(const FinFeature& f) { return plane_to_bed(f.anchor_xy, f.z_angle); }
 
 // plane_to_bed is a rigid transform (orthonormal linear part), so the cheap
 // transpose-based isometry inverse applies.

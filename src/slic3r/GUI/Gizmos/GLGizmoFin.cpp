@@ -194,17 +194,11 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
 
 Transform3d GLGizmoFin::plane_matrix() const
 {
-    // Mirrors FinGeneratorInternal::plane_to_bed()'s (u, w, n) column convention,
-    // restricted to the vertical-only case: rotation is about world Z only, and
-    // the translation's Z is always 0 (the plane's root stays on the bed).
-    Transform3d m = Transform3d::Identity();
-    Matrix3d    R;
-    R.col(0) = Vec3d(-std::sin(m_z_angle), std::cos(m_z_angle), 0.0); // u
-    R.col(1) = Vec3d(0.0, 0.0, 1.0);                                  // w (== world Z)
-    R.col(2) = Vec3d(std::cos(m_z_angle), std::sin(m_z_angle), 0.0);  // n
-    m.linear()      = R;
-    m.translation() = m_plane_center;
-    return m;
+    // The gizmo tracks anchor/azimuth as m_plane_center/m_z_angle (not a FinFeature -- mid-drag
+    // there isn't a persisted one yet), so delegate to the (anchor_xy, z_angle) primitive rather
+    // than hand-mirroring FinGeneratorInternal::plane_to_bed()'s (u, w, n) column formula here.
+    // m_plane_center's Z is always kept at the bed (0), matching plane_to_bed()'s own Z=0 anchor.
+    return FinGeneratorInternal::plane_to_bed(Vec2d(m_plane_center.x(), m_plane_center.y()), m_z_angle);
 }
 
 double GLGizmoFin::rotation_ring_radius() const

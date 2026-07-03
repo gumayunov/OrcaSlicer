@@ -34,9 +34,16 @@ std::vector<TriangleMesh> generate_fin_meshes(const ModelObject& o, const Transf
 // (T00-01-02..05) can reuse them. Not part of the module's stable public API.
 namespace FinGeneratorInternal {
 
-// Plane-frame -> bed-frame transform for a fin feature.
+// Plane-frame -> bed-frame transform for an explicit anchor/azimuth pair.
 // Local axes: x = u (horizontal, fin extends outward along +u), y = w (= Z, height),
-// z = n (horizontal plane normal). At z_angle = 0: u = +Y world, n = +X world.
+// z = n (horizontal plane normal). At z_angle = 0: u = +Y world, n = +X world. This is the
+// primitive the FinFeature overload below builds on; it also lets callers that track the
+// plane's anchor/azimuth outside of a FinFeature (GLGizmoFin::plane_matrix(), mid-drag)
+// reuse the same formula instead of hand-mirroring it.
+Transform3d plane_to_bed(const Vec2d& anchor_xy, double z_angle);
+
+// Plane-frame -> bed-frame transform for a fin feature (uses anchor_xy/z_angle only --
+// every other FinFeature field is irrelevant to the plane's own frame).
 Transform3d plane_to_bed(const FinFeature& f);
 
 // Bed-frame -> plane-frame transform (inverse of plane_to_bed).
