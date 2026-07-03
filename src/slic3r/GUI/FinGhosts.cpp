@@ -12,7 +12,7 @@
 
 #include <glad/gl.h>
 
-#include <cmath>
+#include <algorithm>
 
 namespace Slic3r {
 namespace GUI {
@@ -118,6 +118,92 @@ void render(GLModel& ghost, const Transform3d& model_matrix)
 }
 
 } // namespace FinGhost
+
+void FinGhostsRenderer::render(const Model& model, const ObjectID& skip_object)
+{
+    // Regeneration cadence while a transform is in flux (mid-drag tilt/scale produces a
+    // non-rigid delta every frame). An isolated change regenerates immediately: its
+    // last_regen is at least one interval in the past by then. Starting value per
+    // design 01 -- tune on the manual checkpoint if the ghost feels too laggy/too hot.
+    static constexpr auto RegenInterval = std::chrono::milliseconds(200);
+
+    for (auto& [key, entry] : m_entries)
+        entry.visited = false;
+
+    for (const ModelObject* mo : model.objects) {
+        if (mo == nullptr || mo->id() == skip_object)
+            continue;
+        if (std::none_of(mo->fins.begin(), mo->fins.end(),
+                         [](const FinFeature& f) { return f.enabled; }))
+            continue;
+
+        // Shared by all instances of this object; the instance transform is the only
+        // per-instance key component.
+        std::vector<VolumeKey> volume_keys;
+        for (const ModelVolume* v : mo->volumes)
+            if (v->is_model_part())
+                volume_keys.push_back({ v->id(), v->get_matrix(), static_cast<const void*>(v->mesh_ptr().get()) });
+
+        for (const ModelInstance* instance : mo->instances) {
+            Entry& entry  = m_entries[{ mo->id().id, instance->id().id }];
+            entry.visited = true;
+
+            const Transform3d to_bed = instance->get_matrix();
+            // Order matters: before the first generation entry.to_bed is a meaningless
+            // identity and the delta with it is garbage -- key_stale short-circuits that.
+            const bool key_stale = !entry.generated || entry.fins != mo->fins
+                                || entry.volumes != volume_keys;
+            Transform3d delta = to_bed * entry.to_bed.inverse();
+            if (key_stale || !FinGeneratorInternal::is_bed_rigid_delta(delta)) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - entry.last_regen >= RegenInterval) {
+                    regenerate(entry, *mo, to_bed);
+                    entry.fins       = mo->fins;
+                    entry.volumes    = volume_keys;
+                    entry.last_regen = now;
+                    delta            = Transform3d::Identity();
+                }
+                // else: keep drawing the stale ghost with the current (affine) delta
+                // below -- it visually sticks to the object; the exact shape catches
+                // up at the next regeneration (design 01 §4).
+            }
+            if (!entry.generated)
+                continue; // throttled away before the very first generation
+
+            for (const auto& ghost : entry.ghosts)
+                FinGhost::render(*ghost, delta);
+        }
+    }
+
+    // GC entries whose object/instance disappeared (delete, undo, project close).
+    for (auto it = m_entries.begin(); it != m_entries.end();)
+        it = it->second.visited ? std::next(it) : m_entries.erase(it);
+}
+
+void FinGhostsRenderer::regenerate(Entry& entry, const ModelObject& object, const Transform3d& to_bed)
+{
+    entry.ghosts.clear();
+    entry.to_bed    = to_bed;
+    entry.generated = true;
+
+    // Same pipeline as slicing/the gizmo: merged bed-frame solid -> per enabled fin,
+    // object-local params -> bed frame -> mesh. Degenerate instance transforms
+    // (fin_object_to_bed() -> nullopt) and misses (empty mesh) are skipped -- no ghost
+    // is the honest "nothing will print here" signal, matching slice-time behavior.
+    const indexed_triangle_set solid = FinGeneratorInternal::object_solid_bed(object, to_bed);
+    if (solid.indices.empty())
+        return;
+    for (const FinFeature& fin : object.fins) {
+        if (!fin.enabled)
+            continue;
+        const std::optional<FinFeature> fin_bed = FinGeneratorInternal::fin_object_to_bed(fin, to_bed);
+        if (!fin_bed.has_value())
+            continue;
+        auto ghost = std::make_unique<GLModel>();
+        if (FinGhost::build_ghost(*ghost, solid, *fin_bed))
+            entry.ghosts.push_back(std::move(ghost));
+    }
+}
 
 } // namespace GUI
 } // namespace Slic3r

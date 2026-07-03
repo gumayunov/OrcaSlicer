@@ -43,5 +43,51 @@ void render(GLModel& ghost, const Transform3d& model_matrix);
 
 } // namespace FinGhost
 
+// Always-visible scene ghosts (design 01): one translucent fin preview per
+// (object-with-enabled-fins x instance), rendered by GLCanvas3D without the Fin gizmo.
+// Cached ghost meshes follow the object rigidly while the instance delta keeps the
+// bed-frame silhouette (XY move / Z spin -- FinGeneratorInternal::is_bed_rigid_delta());
+// any other change regenerates, throttled to RegenInterval while a transform is in flux.
+class FinGhostsRenderer
+{
+public:
+    // Renders all ghosts. `skip_object` suppresses one object's ghosts entirely --
+    // pass the Fin gizmo's target object while that gizmo is open (it draws its own
+    // live, possibly-unsaved preview); ObjectID() (invalid) to skip nothing.
+    void render(const Model& model, const ObjectID& skip_object);
+
+private:
+    // Everything a ghost was generated from, compared each frame to detect staleness.
+    struct VolumeKey
+    {
+        ObjectID    id;
+        Transform3d matrix;
+        const void* mesh; // shared-mesh address: replacing a volume's mesh changes it
+        bool operator==(const VolumeKey& rhs) const
+        {
+            return id == rhs.id && matrix.matrix() == rhs.matrix.matrix() && mesh == rhs.mesh;
+        }
+        bool operator!=(const VolumeKey& rhs) const { return !(*this == rhs); }
+    };
+
+    struct Entry
+    {
+        FinFeatures            fins;                                // snapshot of ModelObject::fins
+        std::vector<VolumeKey> volumes;                             // MODEL_PART volumes only
+        Transform3d            to_bed{ Transform3d::Identity() };   // instance matrix at generation time
+        std::vector<std::unique_ptr<GLModel>> ghosts;               // one per enabled fin that produced geometry
+        std::chrono::steady_clock::time_point last_regen{};         // epoch => "never" => first regen is immediate
+        bool generated{ false };                                    // false until the first regeneration ran
+        bool visited{ false };                                      // per-frame GC mark
+    };
+
+    void regenerate(Entry& entry, const ModelObject& object, const Transform3d& to_bed);
+
+    // (ModelObject id, ModelInstance id) -> entry. Instance IDs (not indices) keep the
+    // cache stable across instance list reordering; entries of deleted objects/instances
+    // are garbage-collected via the `visited` mark on every render.
+    std::map<std::pair<size_t, size_t>, Entry> m_entries;
+};
+
 } // namespace GUI
 } // namespace Slic3r
