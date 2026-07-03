@@ -406,6 +406,135 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     CHECK(m.stats().number_of_parts == 1 + 3);
 }
 
+// --- FinGenerator: generate_fin_meshes, object -> bed conversion ------------
+//
+// Pins down the anchor/azimuth conversion under a non-identity `to_bed`
+// (design §13.1-13.2): the fin is defined object-locally, but must come out
+// in the bed frame -- rotated instances only move the anchor / turn the
+// azimuth, and the fin itself must ALWAYS stand vertical on the bed (z from
+// 0). Expectations below are derived from the formulas in
+// generate_fin_meshes(): u_obj = (-sin a, cos a, 0), u_bed = R * u_obj
+// (z zeroed), bed z_angle = atan2(-u_bed.x, u_bed.y).
+//
+// Shared numbers (fin: height 10, length 6, gap 1, thickness 1.2, cube face
+// at |x|=|y|=10): fin body spans [face+gap, face+length] = [11, 16] along +u
+// beyond the section, tabs bridge the gap starting at face-0.1 (kTabOverlap),
+// so the mesh spans ~[9.9, 16] along the fin direction, [-0.6, 0.6] across
+// (thickness), and [0, 10] in z.
+
+namespace {
+
+FinFeature conversion_test_fin()
+{
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 10.0;
+    f.length    = 6.0;
+    f.thickness = 1.2;
+    f.conn_step = 4.0;
+    f.conn_gap  = 1.0;
+    return f;
+}
+
+} // namespace
+
+TEST_CASE("generate_fin_meshes: instance Z rotation turns the fin azimuth", "[fin]")
+{
+    Model        model;
+    ModelObject* o = model.add_object();
+    TriangleMesh cube = make_cube(20.0, 20.0, 20.0);
+    cube.translate(-10.f, -10.f, 0.f); // x,y in [-10,10], z in [0,20], base on bed
+    o->add_volume(std::move(cube), /*modify_to_center_geometry=*/false);
+
+    FinFeature f = conversion_test_fin();
+    o->fins.push_back(f);
+
+    SECTION("identity to_bed: fin extends along +Y (object-local == bed)")
+    {
+        std::vector<TriangleMesh> fins =
+            generate_fin_meshes(*o, Transform3d::Identity(), /*layer_height=*/0.2, /*line_width=*/0.45);
+        REQUIRE(fins.size() == 1);
+
+        BoundingBoxf3 bb = fins.front().bounding_box();
+        CHECK_THAT(bb.max.y(), WithinAbs(16.0, 1e-3)); // +u == +Y at z_angle = 0
+        CHECK_THAT(bb.min.y(), WithinAbs(9.9, 1e-3));  // tabs reach kTabOverlap into the cube
+        CHECK_THAT(bb.size().x(), WithinAbs(1.2, 1e-3)); // thickness across the plane
+        CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));
+        CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));
+    }
+
+    SECTION("to_bed = Rz(90deg): same fin comes out along bed -X")
+    {
+        // u_obj = (0,1,0) -> u_bed = Rz(90) * u_obj = (-1,0,0): the fin's outward
+        // direction lands on bed -X, so the whole fin sits beyond the cube's -X face.
+        Transform3d to_bed(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitZ()));
+        std::vector<TriangleMesh> fins =
+            generate_fin_meshes(*o, to_bed, /*layer_height=*/0.2, /*line_width=*/0.45);
+        REQUIRE(fins.size() == 1);
+
+        BoundingBoxf3 bb = fins.front().bounding_box();
+        CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3)); // +u == -X now
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.9, 1e-3));
+        CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
+        CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // still standing on the bed
+        CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // still exactly `height` tall
+    }
+}
+
+TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vertical", "[fin]")
+{
+    // Object-local cube fully centered on the origin (x,y,z in [-10,10]) so that
+    // to_bed = Tz(10) * Rx(90) puts it back onto the bed (x,y in [-10,10],
+    // z in [0,20]) AND the object's z=0 plane (which the fin anchor lives on)
+    // maps to bed plane y=0 -- through the middle of the tipped cube, where the
+    // fin plane can actually cut material.
+    Model        model;
+    ModelObject* o = model.add_object();
+    TriangleMesh cube = make_cube(20.0, 20.0, 20.0);
+    cube.translate(-10.f, -10.f, -10.f);
+    o->add_volume(std::move(cube), /*modify_to_center_geometry=*/false);
+
+    Transform3d to_bed = Transform3d::Identity();
+    to_bed.translate(Vec3d(0.0, 0.0, 10.0));
+    to_bed.rotate(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
+
+    SECTION("fin whose u-axis stays horizontal is generated, vertical on the bed")
+    {
+        // z_angle = PI/2 -> u_obj = (-1,0,0); Rx(90) leaves the X axis in place, so
+        // u_bed = (-1,0,0): fin along bed -X. Design §13.2's key promise: despite
+        // the tipped instance the fin stands VERTICAL in the bed frame -- z from 0
+        // (the bed) to exactly `height`, not tipped along with the object.
+        FinFeature f = conversion_test_fin();
+        f.z_angle    = 0.5 * PI;
+        o->fins.push_back(f);
+
+        std::vector<TriangleMesh> fins =
+            generate_fin_meshes(*o, to_bed, /*layer_height=*/0.2, /*line_width=*/0.45);
+        REQUIRE(fins.size() == 1);
+
+        BoundingBoxf3 bb = fins.front().bounding_box();
+        CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // starts at the bed
+        CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // exactly `height` tall
+        CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3));  // beyond the cube's -X face
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.9, 1e-3));
+        CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
+    }
+
+    SECTION("fin whose u-axis becomes vertical is skipped as degenerate")
+    {
+        // z_angle = 0 -> u_obj = (0,1,0); Rx(90) maps it to (0,0,1) -- projecting
+        // onto the bed plane leaves a zero vector, so no bed azimuth exists and
+        // generate_fin_meshes() must skip the fin instead of emitting garbage.
+        FinFeature f = conversion_test_fin();
+        o->fins.push_back(f);
+
+        std::vector<TriangleMesh> fins =
+            generate_fin_meshes(*o, to_bed, /*layer_height=*/0.2, /*line_width=*/0.45);
+        CHECK(fins.empty());
+    }
+}
+
 // --- FinGenerator: visual checkpoint (T00-01-06) ----------------------------
 //
 // Not a real regression test: dumps binary STLs of the input cube and the
