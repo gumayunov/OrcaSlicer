@@ -1,8 +1,24 @@
 #include "GLGizmoFin.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/Camera.hpp"
+
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/Model.hpp" // FinFeature
+
+#include <glad/gl.h>
+#include <wx/utils.h>
+
+#include <algorithm>
+#include <cmath>
 
 namespace Slic3r {
 namespace GUI {
+
+static constexpr double MinFinDimension = 0.5; // mm -- the plane may not collapse to zero size
+static constexpr double MinRotationRingRadius = 6.0; // mm
+static constexpr unsigned int RotationRingSegments = 48;
 
 GLGizmoFin::GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -11,6 +27,8 @@ GLGizmoFin::GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, uns
 
 bool GLGizmoFin::on_init()
 {
+    for (int i = 0; i < int(Count); ++i)
+        m_grabbers.push_back(Grabber());
     return true;
 }
 
@@ -19,9 +37,25 @@ std::string GLGizmoFin::on_get_name() const
     return _u8L("Fin");
 }
 
-void GLGizmoFin::on_render()
+void GLGizmoFin::on_set_state()
 {
-    // Intentionally empty: plane state and rendering are added in later tasks.
+    // T00-04-02: no FinFeature is read from the object yet, so every activation
+    // (re-)seeds the plane from sensible defaults. A later task (T00-04-05) will
+    // load an existing FinFeature here instead, when one is selected/present.
+    if (get_state() == On)
+        init_from_selection();
+}
+
+void GLGizmoFin::init_from_selection()
+{
+    const BoundingBoxf3& bbox = m_parent.get_selection().get_bounding_box();
+    const Vec3d center = bbox.center();
+    m_plane_center = Vec3d(center.x(), center.y(), 0.0);
+    m_z_angle      = 0.0;
+
+    const FinFeature defaults;
+    m_height = defaults.height;
+    m_length = defaults.length;
 }
 
 bool GLGizmoFin::on_is_selectable() const
@@ -33,6 +67,269 @@ bool GLGizmoFin::on_is_activable() const
 {
     // Fin gizmo only makes sense for a single, fully selected object instance.
     return m_parent.get_selection().is_single_full_instance();
+}
+
+void GLGizmoFin::on_register_raycasters_for_picking()
+{
+    // the gizmo grabbers are rendered on top of the scene, so the raytraced picker should take it into account
+    m_parent.set_raycaster_gizmos_on_top(true);
+}
+
+void GLGizmoFin::on_unregister_raycasters_for_picking()
+{
+    m_parent.set_raycaster_gizmos_on_top(false);
+}
+
+bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
+{
+    return use_grabbers(mouse_event);
+}
+
+Transform3d GLGizmoFin::plane_matrix() const
+{
+    // Mirrors FinGeneratorInternal::plane_to_bed()'s (u, w, n) column convention,
+    // restricted to the vertical-only case: rotation is about world Z only, and
+    // the translation's Z is always 0 (the plane's root stays on the bed).
+    Transform3d m = Transform3d::Identity();
+    Matrix3d    R;
+    R.col(0) = Vec3d(-std::sin(m_z_angle), std::cos(m_z_angle), 0.0); // u
+    R.col(1) = Vec3d(0.0, 0.0, 1.0);                                  // w (== world Z)
+    R.col(2) = Vec3d(std::cos(m_z_angle), std::sin(m_z_angle), 0.0);  // n
+    m.linear()      = R;
+    m.translation() = m_plane_center;
+    return m;
+}
+
+double GLGizmoFin::rotation_ring_radius() const
+{
+    return std::max(0.6 * std::max(m_height, m_length), MinRotationRingRadius);
+}
+
+double GLGizmoFin::get_layer_height_snap_step() const
+{
+    if (wxGetApp().preset_bundle != nullptr) {
+        const double layer_height = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
+        if (layer_height > 0.0)
+            return layer_height;
+    }
+    // No print config available (e.g. running headless) -- fall back to a plain mm snap.
+    return m_snap_step;
+}
+
+void GLGizmoFin::init_rendering_items()
+{
+    if (m_rendering_items_ready)
+        return;
+
+    // Unit quad (0..1 x 0..1) in the local plane frame (x = u, y = w); scaled to
+    // (m_length, m_height) at render time so the geometry never needs rebuilding
+    // while H/L are being dragged.
+    GLModel::Geometry fill_data;
+    fill_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+    fill_data.reserve_vertices(4);
+    fill_data.reserve_indices(6);
+    fill_data.add_vertex(Vec3f(0.0f, 0.0f, 0.0f));
+    fill_data.add_vertex(Vec3f(1.0f, 0.0f, 0.0f));
+    fill_data.add_vertex(Vec3f(1.0f, 1.0f, 0.0f));
+    fill_data.add_vertex(Vec3f(0.0f, 1.0f, 0.0f));
+    fill_data.add_triangle(0, 1, 2);
+    fill_data.add_triangle(0, 2, 3);
+    fill_data.color = ColorRGBA(0.9f, 0.9f, 0.9f, 0.45f);
+    m_plane_fill.init_from(std::move(fill_data));
+
+    GLModel::Geometry border_data;
+    border_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P3 };
+    border_data.reserve_vertices(4);
+    border_data.reserve_indices(4);
+    border_data.add_vertex(Vec3f(0.0f, 0.0f, 0.0f));
+    border_data.add_vertex(Vec3f(1.0f, 0.0f, 0.0f));
+    border_data.add_vertex(Vec3f(1.0f, 1.0f, 0.0f));
+    border_data.add_vertex(Vec3f(0.0f, 1.0f, 0.0f));
+    for (unsigned int i = 0; i < 4; ++i)
+        border_data.add_index(i);
+    border_data.color = ColorRGBA::YELLOW();
+    m_plane_border.init_from(std::move(border_data));
+
+    GLModel::Geometry ring_data;
+    ring_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P3 };
+    ring_data.reserve_vertices(RotationRingSegments);
+    ring_data.reserve_indices(RotationRingSegments);
+    for (unsigned int i = 0; i < RotationRingSegments; ++i) {
+        const float angle = float(i) * 2.0f * float(PI) / float(RotationRingSegments);
+        ring_data.add_vertex(Vec3f(std::cos(angle), std::sin(angle), 0.0f));
+        ring_data.add_index(i);
+    }
+    ring_data.color = ColorRGBA::GRAY();
+    m_rotation_ring.init_from(std::move(ring_data));
+
+    m_rendering_items_ready = true;
+}
+
+void GLGizmoFin::render_plane(const Transform3d& plane_m)
+{
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    const Transform3d view_model_matrix = camera.get_view_matrix() * plane_m * Geometry::scale_transform(Vec3d(m_length, m_height, 1.0));
+    shader->set_uniform("view_model_matrix", view_model_matrix);
+    m_plane_fill.render();
+
+    shader->set_uniform("width", 0.5f);
+    m_plane_border.render();
+
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->stop_using();
+}
+
+void GLGizmoFin::render_rotation_ring()
+{
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    shader->start_using();
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    const double r = rotation_ring_radius();
+    const Transform3d view_model_matrix = camera.get_view_matrix() * Geometry::translation_transform(m_plane_center) * Geometry::scale_transform(Vec3d(r, r, r));
+    shader->set_uniform("view_model_matrix", view_model_matrix);
+    shader->set_uniform("width", 0.5f);
+    m_rotation_ring.render();
+
+    shader->stop_using();
+}
+
+void GLGizmoFin::update_grabbers(const Transform3d& plane_m)
+{
+    for (Grabber& g : m_grabbers)
+        g.matrix = plane_m;
+
+    // Grabber centers are expressed in the local plane frame (x = u, y = w, z = n);
+    // Grabber::render() maps them to world space via g.matrix (== plane_m).
+    m_grabbers[Move].center        = Vec3d::Zero();
+    m_grabbers[ZRotation].center   = Vec3d(0.0, 0.0, rotation_ring_radius());
+    m_grabbers[TopHeight].center   = Vec3d(0.5 * m_length, m_height, 0.0);
+    m_grabbers[OuterLength].center = Vec3d(m_length, 0.5 * m_height, 0.0);
+}
+
+void GLGizmoFin::on_render()
+{
+    init_rendering_items();
+
+    glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    const Transform3d plane_m = plane_matrix();
+
+    render_plane(plane_m);
+    render_rotation_ring();
+
+    update_grabbers(plane_m);
+    render_grabbers(Grabber::FixedGrabberSize);
+}
+
+void GLGizmoFin::on_start_dragging()
+{
+    m_drag_start_center  = m_plane_center;
+    m_drag_start_z_angle = m_z_angle;
+    m_drag_start_height  = m_height;
+    m_drag_start_length  = m_length;
+    m_drag_ref_captured  = false;
+
+    if (m_hover_id >= 0 && size_t(m_hover_id) < m_grabbers.size())
+        m_drag_start_world_pos = m_grabbers[m_hover_id].matrix * m_grabbers[m_hover_id].center;
+}
+
+void GLGizmoFin::on_stop_dragging()
+{
+    m_drag_ref_captured = false;
+}
+
+double GLGizmoFin::calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const
+{
+    double projection = 0.0;
+    const double axis_len = axis_dir.norm();
+    if (axis_len > 1e-9) {
+        const Vec3d axis_unit = axis_dir / axis_len;
+        const Vec3d mouse_dir = data.mouse_ray.unit_vector();
+        // Intersect the mouse ray with the plane parallel to the camera viewport and passing
+        // through ref_point (same technique as GLGizmoMove3D::calc_projection), then project
+        // the resulting offset onto axis_dir. Works for any axis direction, incl. world Z.
+        const Vec3d inters = data.mouse_ray.a + (ref_point - data.mouse_ray.a).dot(mouse_dir) * mouse_dir;
+        projection = (inters - ref_point).dot(axis_unit);
+    }
+    if (wxGetKeyState(WXK_SHIFT) && snap_step > 0.0)
+        projection = snap_step * std::round(projection / snap_step);
+    return projection;
+}
+
+void GLGizmoFin::on_dragging(const UpdateData& data)
+{
+    if (m_hover_id < 0)
+        return;
+
+    switch (m_hover_id) {
+    case Move: {
+        // Bed translation: literal ray / Z=0 plane intersection (the bed IS the plane's
+        // root, so this is always well defined -- no viewport-parallel approximation needed).
+        const Vec3d bed_hit = data.mouse_ray.intersect_plane(0.0);
+        if (!m_drag_ref_captured) {
+            m_drag_ref_bed_point = bed_hit;
+            m_drag_ref_captured  = true;
+        }
+        Vec3d delta = bed_hit - m_drag_ref_bed_point;
+        if (wxGetKeyState(WXK_SHIFT)) {
+            delta.x() = m_snap_step * std::round(delta.x() / m_snap_step);
+            delta.y() = m_snap_step * std::round(delta.y() / m_snap_step);
+        }
+        m_plane_center    = m_drag_start_center + Vec3d(delta.x(), delta.y(), 0.0);
+        m_plane_center.z() = 0.0; // constraint: the plane's root never leaves the bed
+        break;
+    }
+    case ZRotation: {
+        // Angle in the bed plane around the (fixed, during this drag) plane center.
+        const Vec3d  bed_hit = data.mouse_ray.intersect_plane(0.0);
+        const double dx      = bed_hit.x() - m_plane_center.x();
+        const double dy      = bed_hit.y() - m_plane_center.y();
+        if (dx * dx + dy * dy < 1e-9)
+            break; // degenerate: mouse projects (almost) onto the rotation axis itself
+        const double angle = std::atan2(dy, dx);
+        if (!m_drag_ref_captured) {
+            m_drag_ref_angle    = angle;
+            m_drag_ref_captured = true;
+        }
+        m_z_angle = m_drag_start_z_angle + (angle - m_drag_ref_angle);
+        break;
+    }
+    case TopHeight: {
+        const double projection = calc_axis_projection(data, m_drag_start_world_pos, Vec3d::UnitZ(), get_layer_height_snap_step());
+        m_height = std::max(MinFinDimension, m_drag_start_height + projection);
+        break;
+    }
+    case OuterLength: {
+        const Vec3d  u          = plane_matrix().linear().col(0); // z_angle is constant during this drag
+        const double projection = calc_axis_projection(data, m_drag_start_world_pos, u, m_snap_step);
+        m_length = std::max(MinFinDimension, m_drag_start_length + projection);
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 } // namespace GUI
