@@ -53,7 +53,13 @@ FinFeature crossing_fin()
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 20.0;
-    f.length    = 6.0;
+    // Window semantics (design doc §15): the anchor sits at the box's own center along u, so the
+    // section's far-side surface is at local u=5 (half-width) and the window's near edge (past the
+    // 1mm gap) is at u=6. length=6 (the pre-§15 value) would put the window's own right edge
+    // exactly ON that near edge -- a degenerate/empty window -- so length is bumped to 8, leaving a
+    // real (if narrow, u in [6,8]) window open; this is the minimum change needed to keep "adds
+    // geometry" meaningfully true, the qualitative property this fixture's tests actually check.
+    f.length    = 8.0;
     f.thickness = 1.2;
     f.conn_step = 4.0;
     f.conn_gap  = 1.0;

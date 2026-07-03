@@ -10,8 +10,10 @@
 
 #include <boost/filesystem/operations.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 
 using namespace Slic3r;
@@ -339,7 +341,11 @@ TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 15.0;
-    f.length    = 8.0;
+    // Window semantics (design doc §15): the anchor sits at the cube's own center along u, so the
+    // section's surface is at local u = 10 (half-width) and the window's near edge (after the gap)
+    // is at u = 11. length must clear that to leave any window open at all -- 16 (> 11) does, with
+    // room to spare; length=8 (pre-§15) would land the whole window inside the part+gap -> empty.
+    f.length    = 16.0;
 
     CHECK_FALSE(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
 }
@@ -367,7 +373,14 @@ TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 20.0;
-    f.length    = 6.0;
+    // Window semantics (design doc §15): with the anchor at the cube's own center (u=0), the
+    // section's far-side surface sits at local u = 10 and the window's near edge (past the gap) at
+    // u = 11 -- length must exceed that for the window to have any room left, on EITHER side of the
+    // flip below (center-anchoring is symmetric, so one length works for both directions, unlike
+    // moving the anchor to a single face). 16 gives a clean 5mm-wide slice, same width the old
+    // bbox-rectangle model produced with length=6 (kept here only as a memorable round number, not
+    // because the exact width matters to this test).
+    f.length    = 16.0;
     f.conn_gap  = 1.0;
 
     TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
@@ -410,7 +423,10 @@ TEST_CASE("fin: wall has the requested thickness", "[fin]")
     f.anchor_xy  = Vec2d(0.0, 0.0);
     f.z_angle    = 0.0;
     f.height     = 15.0;
-    f.length     = 6.0;
+    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near edge
+    // at u=11 (default conn_gap=1.0) -- length must exceed that or the fin is empty (length=6, the
+    // pre-§15 value, would be). This test only cares about the wall's thickness, not its width.
+    f.length     = 16.0;
     f.thickness  = 1.2;
 
     BoundingBoxf3 bb = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).bounding_box();
@@ -426,7 +442,13 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 15.0;
-    f.length    = 6.0;
+    // Window semantics (design doc §15): center anchor -> section's far-side surface at local
+    // u=10, window's near edge at u=11 (default conn_gap=1.0). length=16 (> 11) leaves a real
+    // window open; the pre-§15 value (6) would land the whole window inside the part+gap -> empty.
+    // 16 is also chosen so the *width* below (length - (surface+gap) = 16-11 = 5) matches exactly
+    // what the old bbox-rectangle model produced with length=6, so every number below this point
+    // (area/volume/tab math) is unchanged from before the §15 rework.
+    f.length    = 16.0;
     f.thickness = 1.2;
     // f.conn_step (4.0) and f.conn_gap (1.0) are left at their defaults.
 
@@ -452,17 +474,20 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     REQUIRE(n_tab_rows == 4);
     CHECK(m.stats().number_of_parts == 1 + n_tab_rows); // one shell + one per tab
 
-    // fin2d is exactly known here: the plane (bed X=0) cuts the cube into a full
-    // u in [-10,10], w in [0,30] cross-section; the fin rectangle is u in [0,16]
-    // (u_split=0 .. bb.max+length=10+6), w in [0,15] (=height); the default 1mm
-    // conn_gap offsets the section to u in [-11,11], eating u in [0,11] of the
-    // rectangle, leaving fin2d = u in [11,16] x w in [0,15] -> area 5*15 = 75 mm^2.
-    // volume = area * thickness confirms both the extrusion geometry and the
-    // winding (a flipped/self-intersecting prism would not match this exactly).
+    // fin2d is exactly known here (design doc §15): the plane (bed X=0) cuts the cube into a full
+    // u in [-10,10], w in [0,30] cross-section, so the section's far-side surface is at local
+    // u=10 for every w in [0,30]. The window is u in [0,16] (length=16), w in [0,15] (=height,
+    // capped at min(15, model top=30) = 15, no capping here). The shadow covers u >= 10 everywhere
+    // within the window's own w-range, so candidate = window itself; the default 1mm conn_gap then
+    // carves out u in [-11,11] (offset_sec), leaving fin2d = u in [11,16] x w in [0,15] ->
+    // area 5*15 = 75 mm^2 -- the fill-to-bed step adds nothing new since candidate already reaches
+    // w=0. volume = area * thickness confirms both the extrusion geometry and the winding (a
+    // flipped/self-intersecting prism would not match this exactly).
     double wall_volume = 75.0 * f.thickness;
-    // Each tab is its_make_cube(conn_gap + 0.2, layer_height, 2*line_width) (see
-    // generate_one_fin): u spans the gap plus a 0.1mm overlap on each side, w is
-    // exactly one layer tall, n is two perimeters thick.
+    // Each tab spans d(w) + 2*kTabOverlap along u, d(w) = inner(w) - surface_u(w) (generate_one_fin,
+    // design doc §15). Here surface_u=10 and inner=min(surface_u+conn_gap, length)=11 (the window
+    // doesn't clamp it, since length=16 > 11), so d=conn_gap=1.0 exactly like the pre-§15 formula --
+    // same its_make_cube(conn_gap + 0.2, layer_height, 2*line_width) as before.
     double tab_volume      = (f.conn_gap + 0.2) * layer_height * (2.0 * line_width);
     double expected_volume = wall_volume + n_tab_rows * tab_volume;
     CHECK_THAT(m.volume(), WithinAbs(expected_volume, 0.05));
@@ -490,7 +515,10 @@ TEST_CASE("fin: connector count = floor(H/X)+1", "[fin]")
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 20.0;
-    f.length    = 6.0;
+    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near
+    // edge at u=11 -- length must exceed that (the pre-§15 value, 6, would leave the fin empty).
+    // The exact width doesn't matter to this test (only tab counts/volume comparisons do).
+    f.length    = 16.0;
     f.conn_step = 5.0;
     f.conn_gap  = 1.0;
 
@@ -520,8 +548,15 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     FinFeature f;
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
-    f.height    = 30.0; // fin itself may exceed the model -- allowed
-    f.length    = 6.0;
+    // f.height = 30 asks for a fin taller than the 10mm-tall model. Design doc §15 REVOKES the
+    // earlier "H above the model is allowed" rule (§8/§13.3): above the model's own top there is no
+    // section, hence no shadow, hence no fin material -- the window's own w-range is capped at
+    // min(H, model top) = min(30, 10) = 10 (generate_one_fin's `w_top`), so the fin's bbox must come
+    // out exactly 10mm tall, not 30.
+    f.height    = 30.0;
+    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near
+    // edge at u=11 -- length must exceed that (the pre-§15 value, 6, would leave the fin empty).
+    f.length    = 16.0;
     f.conn_step = 5.0;
     f.conn_gap  = 1.0;
 
@@ -531,8 +566,177 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     REQUIRE_FALSE(m.empty());
     CHECK(m.stats().open_edges == 0);
 
+    // Capped at the model's own top (10), not the requested height (30) -- see the comment above.
+    CHECK_THAT(m.bounding_box().size().z(), WithinAbs(10.0, 0.5));
+
     // Rows w=0,5,10 are within the model's own height (10) -> 3 tabs.
     CHECK(m.stats().number_of_parts == 1 + 3);
+}
+
+// --- FinGenerator: gizmo window + part shadow (design doc §15) -------------
+
+TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side or above the part", "[fin]")
+{
+    // A tall, thin slab tilted about the X axis so its (u,w) cross-section at the fin's plane is
+    // a diagonal band, not an axis-aligned rectangle -- the shape that exposed the old bbox-
+    // rectangle bug (design doc §15): with the old model the fin could be built behind a tilted
+    // part, far from its surface, or above its actual top.
+    //
+    // Built via its_make_cube() + its_transform() with a REAL rotation (not a hand-rolled sheared
+    // mesh), so winding/orientation come for free from its_make_cube()'s own correctness. Expected
+    // geometry is derived programmatically below from that SAME rotation applied to the box's own
+    // corners, rather than hand-computed trig, so the test can't silently drift from what the mesh
+    // actually contains.
+    const double hw = 2.0, hh = 20.0, hd = 5.0; // half-width/height/depth before rotation
+    indexed_triangle_set slab = its_make_cube(2 * hd, 2 * hw, 2 * hh);
+    its_translate(slab, Vec3f(float(-hd), float(-hw), float(-hh))); // center on the origin
+
+    const double phi = 15.0 * PI / 180.0; // tilt angle
+    Transform3d  rot(Eigen::AngleAxisd(-phi, Vec3d::UnitX()));
+    its_transform(slab, rot);
+
+    // The four Y,Z corners of the (pre-shift) cross-section, rotated the same way as the mesh --
+    // X is irrelevant to a rotation about the X axis, so 0 is used as a placeholder.
+    auto  corner = [&](double y, double z) { return rot * Vec3d(0.0, y, z); };
+    Vec3d A = corner(-hw, -hh), B = corner(hw, -hh), C = corner(hw, hh), D = corner(-hw, hh);
+
+    // Shift the whole slab up so its lowest point sits exactly on the bed (w=0), matching the
+    // "object sits on the bed" contract generate_one_fin() relies on (contour_u_at()'s doc comment).
+    double z_shift = -std::min({A.z(), B.z(), C.z(), D.z()});
+    its_translate(slab, Vec3f(0.f, 0.f, float(z_shift)));
+    for (Vec3d* p : {&A, &B, &C, &D})
+        p->z() += z_shift;
+
+    // B and C share the original "+Y" (right) side of the box, so edge B-C is the RIGHT boundary
+    // (max u at a given w) of the tilted cross-section -- the "surface" the shadow/tabs measure
+    // against -- from the bed up to C; edge C-D takes over from there up to the topmost corner D.
+    // (A and the A-B/D-A edges bound the LEFT side and never matter here.)
+    REQUIRE(B.z() < C.z());
+    REQUIRE(C.z() < D.z());
+    REQUIRE_THAT(B.z(), WithinAbs(0.0, 1e-6)); // B is the lowest corner -> exactly the bed after the shift above
+
+    auto lerp_u = [](const Vec3d& p0, const Vec3d& p1, double w) {
+        double t = (w - p0.z()) / (p1.z() - p0.z());
+        return p0.y() + t * (p1.y() - p0.y());
+    };
+    // Piecewise right-boundary of the tilted slab, clamped into the slab's own height range -- the
+    // same boundary contour_u_at(section, w, max_side=true) sees inside generate_one_fin(). Used
+    // for the per-vertex near-side check below, where every mesh vertex is, by construction of the
+    // solid, guaranteed to sit at a height within [B.z(), D.z()] (checked separately, not via
+    // clamping) -- clamping here only protects against sub-epsilon float noise at the boundary.
+    auto surface_u_at = [&](double w) {
+        double wc = std::clamp(w, B.z(), D.z());
+        return wc <= C.z() ? lerp_u(B, C, wc) : lerp_u(C, D, wc);
+    };
+    // Strict version for the tab-row loop below, where "no material at this height" (nullopt) must
+    // stay distinguishable from "material, and close enough to reach with a tab".
+    auto surface_u_strict = [&](double w) -> std::optional<double> {
+        if (w < B.z() || w > D.z())
+            return std::nullopt;
+        return surface_u_at(w);
+    };
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = D.z() + 5.0; // taller than the slab's own top -> exercises the model-top cap too
+    f.length    = 10.0;        // comfortably beyond any inner(w) reached below -- never the binding edge
+    f.thickness = 1.2;
+    f.conn_step = 2.0;
+    f.conn_gap  = 1.0;
+
+    TriangleMesh m = generate_one_fin(slab, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE_FALSE(m.empty());
+
+    constexpr double kTabOverlap    = 0.1; // must match generate_one_fin()'s own constant
+    constexpr double kTabReachSlack = 0.2; // must match generate_one_fin()'s own constant
+    constexpr double kSlack         = 0.3; // generous epsilon: float32 mesh vertices + kTabReachSlack
+
+    // (a) no fin vertex on the near side, and (b) none above the slab's own top: every vertex's u
+    // (== bed-frame Y, since z_angle=0) must be within [surface_u(w) - kTabOverlap, +inf) of the
+    // surface at that height (w == bed-frame Z, must itself fall within [0, D.z()] -- f.height asks
+    // for more, see above, so a vertex above D.z() would be a real capping-bug regression, not a
+    // legitimate tall fin).
+    for (const Vec3f& v : m.its.vertices) {
+        double w = double(v.z());
+        CHECK(w >= -kSlack);
+        CHECK(w <= D.z() + kSlack);
+        CHECK(double(v.y()) >= surface_u_at(w) - kTabOverlap - kSlack);
+    }
+
+    // (d) stands on the bed.
+    CHECK_THAT(m.bounding_box().min.z(), WithinAbs(0.0, 0.5));
+
+    // (c) tabs only where the surface is within conn_gap + kTabReachSlack of the fin's inner edge
+    // -- computed the same way generate_one_fin() does, from surface_u_strict() above.
+    int n_rows         = FinGeneratorInternal::fin_connector_rows(f);
+    int expected_tabs  = 0;
+    for (int k = 0; k < n_rows; ++k) {
+        std::optional<double> surface = surface_u_strict(k * f.conn_step);
+        if (!surface)
+            continue; // above the slab's own top -- no material, no tab
+        double inner = std::min(std::max(*surface + f.conn_gap, 0.0), f.length);
+        double d     = inner - *surface;
+        if (d <= f.conn_gap + kTabReachSlack)
+            ++expected_tabs;
+    }
+    REQUIRE(expected_tabs > 0);      // the test's own premise: some rows are close enough for a tab
+    REQUIRE(expected_tabs < n_rows); // ... and some aren't (near the bed, the tilt has carried the
+                                      // surface too far from the window's near edge) -- the tilt is
+                                      // what makes this test exercise something the axis-aligned
+                                      // ones don't.
+    CHECK(m.stats().number_of_parts == 1 + expected_tabs);
+    CHECK(m.stats().open_edges == 0);
+}
+
+TEST_CASE("fin: window fully inside the part -> empty mesh", "[fin]")
+{
+    // Window semantics (design doc §15): with the anchor at the cube's own center and a length
+    // that never reaches the section's far-side surface (10, half-width) plus the gap (1), the
+    // window [0,length] never overlaps the shadow (u >= surface_u(w) + gap) at all -- the
+    // "window entirely within the part+gap" empty-result contract (requirement 4).
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 15.0;
+    f.length    = 5.0; // < surface(10) + gap(1) = 11
+    f.conn_gap  = 1.0;
+
+    CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
+}
+
+TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-width fin, zero tabs", "[fin]")
+{
+    // Anchor placed so the section's surface sits at local u = -10 for every row (well beyond
+    // -(gap+kTabReachSlack) = -1.2) -- "the part is further out than the gizmo allows" (§15's
+    // tab rule) at EVERY row, but the shadow condition (u >= surface_u(w) + gap = -9) still covers
+    // the entire window (u in [0,10]), since -9 < 0. Expect: the wall fills the window edge to
+    // edge (no near-side carve, since offset_sec doesn't reach anywhere near u=0), but not a
+    // single tab (d(w) = -surface_u(w) = 10 for every row, way past conn_gap + kTabReachSlack).
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 20.0); // local u = world Y - 20 -> surface (world Y=10) at local u=-10
+    f.z_angle   = 0.0;
+    f.height    = 15.0;
+    f.length    = 10.0;
+    f.thickness = 1.2;
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    TriangleMesh m = generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE_FALSE(m.empty());
+
+    CHECK(m.stats().number_of_parts == 1); // the wall, and nothing else -- zero tabs
+    CHECK(m.stats().open_edges == 0);
+
+    // Full-width columns: fin2d is the entire window, untouched by the gap carve -> area
+    // length * height = 10 * 15 = 150 mm^2, volume = area * thickness.
+    CHECK_THAT(m.volume(), WithinAbs(150.0 * f.thickness, 0.5));
 }
 
 // --- FinGenerator: generate_fin_meshes, object -> bed conversion ------------
@@ -545,11 +749,17 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
 // generate_fin_meshes(): u_obj = (-sin a, cos a, 0), u_bed = R * u_obj
 // (z zeroed), bed z_angle = atan2(-u_bed.x, u_bed.y).
 //
-// Shared numbers (fin: height 10, length 6, gap 1, thickness 1.2, cube face
-// at |x|=|y|=10): fin body spans [face+gap, face+length] = [11, 16] along +u
-// beyond the section, tabs bridge the gap starting at face-0.1 (kTabOverlap),
-// so the mesh spans ~[9.9, 16] along the fin direction, [-0.6, 0.6] across
-// (thickness), and [0, 10] in z.
+// Shared numbers (fin: height 10, length 16, gap 1, thickness 1.2, cube half-width 10 along the
+// relevant axis, anchor at the cube's own center -- window semantics, design doc §15): the
+// section's far-side surface sits at local u=10 (from the center anchor), the window's near edge
+// (past the gap) at u=11, and length=16 keeps the window open past that (length=6, the pre-§15
+// value, would land the whole window inside the part+gap -> empty, breaking every test below).
+// fin body spans [11, 16] along +u beyond the section (u=16 is exactly the window's own right
+// edge now, rather than "surface + length" under the old bbox model -- see generate_one_fin()),
+// tabs bridge the gap starting at face-0.1 (kTabOverlap), so the mesh spans ~[9.9, 16] along the
+// fin direction, [-0.6, 0.6] across (thickness), and [0, 10] in z. These numbers are unchanged
+// from before the §15 rework (only `length` moved, from 6 to 16, to compensate for the window now
+// being measured from the anchor instead of from the section's own edge).
 
 namespace {
 
@@ -559,7 +769,7 @@ FinFeature conversion_test_fin()
     f.anchor_xy = Vec2d(0.0, 0.0);
     f.z_angle   = 0.0;
     f.height    = 10.0;
-    f.length    = 6.0;
+    f.length    = 16.0;
     f.thickness = 1.2;
     f.conn_step = 4.0;
     f.conn_gap  = 1.0;

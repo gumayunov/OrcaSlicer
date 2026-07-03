@@ -171,7 +171,7 @@ void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, d
 // below w=0, so every edge touching the bed has 0 as its lower endpoint),
 // and w <= y1 covers w exactly at the model's own top (its upper endpoint).
 //
-// Shares the multi-component/concave caveat documented at the fin2d rectangle
+// Shares the multi-component/concave caveat documented at the shadow construction
 // in generate_one_fin(): the extreme-u scan can pick the far edge of the wrong
 // disjoint piece of the section; same future centroid-filter fix applies.
 std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool max_side)
@@ -202,6 +202,35 @@ std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool ma
     return best ? std::make_optional(unscale<double>(*best)) : std::nullopt;
 }
 
+// Sweeps every outer contour of `src` along the straight segment from (0,0) to `delta` (scaled mm,
+// u/w plane) via Clipper's Minkowski sum (ClipperLib::MinkowskiSum, vendored in
+// deps_src/clipper/clipper.hpp), unioning the per-contour results together. Used for both the +u
+// "shadow" sweep and the downward "fill to bed" sweep of generate_one_fin() (design doc §15) --
+// same primitive, different delta.
+//
+// Holes are intentionally dropped (only ep.contour is swept, never ep.holes): sweeping just the
+// outer contour reproduces the *filled* polygon's own Minkowski sum. Verified empirically (see the
+// scratch harness used while implementing this): MinkowskiSum(pattern, contour, closed=true) on a
+// square with a central square hole -- feeding only the outer contour -- yields a solid swept
+// rectangle, not a grooved one, because material swept in from the near side of where the hole used
+// to be closes the gap for any sweep length reaching past the hole's own width in the sweep
+// direction, which both call sites below guarantee (their `delta` always reaches past the window's
+// far edge / the bed, plus a margin). Consequence: a hole can never punch a "window" into the shadow
+// or the fill -- the outer silhouette alone determines both, matching the design's requirement that
+// holes can't create fin material where none should be.
+ExPolygons sweep_ex(const ExPolygons& src, const Point& delta)
+{
+    ClipperLib::Path pattern{Point(0, 0), delta};
+    Polygons         out;
+    for (const ExPolygon& ep : src) {
+        ClipperLib::Paths solution;
+        ClipperLib::MinkowskiSum(pattern, ep.contour.points, solution, /*pathIsClosed=*/true);
+        for (const ClipperLib::Path& p : solution)
+            out.emplace_back(p);
+    }
+    return union_ex(out);
+}
+
 } // namespace
 
 TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
@@ -223,54 +252,91 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (section.empty())
         return TriangleMesh(); // plane doesn't intersect the solid -> no fin body
 
-    // 2D fin region: a rectangle on the +u side of the section (from the section's
-    // u-midpoint out to `length` beyond its far edge, 0..`height` tall -- 0 = bed by
-    // contract), truncated by the section contour offset outward by `conn_gap`. This
-    // keeps the fin following the object's silhouette with a small standoff gap, and
-    // the flip (z_angle += PI, tested in test_fin.cpp) swaps which side is +u, so this
-    // single code path (always "+u side of the section bbox") handles both sides.
-    // Section cross-sections seen so far are convex (single rectangle), so the bbox
-    // midpoint split is sufficient. It can pick the wrong u on a concave section, or
-    // on a disjoint multi-component one (e.g. two separate legs crossing the plane),
-    // where the bbox midpoint may bisect the wrong side; the fix for both is the
-    // same: keep the diff components whose centroid u exceeds the section's centroid
-    // u (not needed by current tests).
-    BoundingBox bb      = get_extents(section);
-    coord_t     u_split = bb.center().x();
-    coord_t     u_out   = bb.max.x() + scaled(fin_bed_frame.length);
-    coord_t     w_top   = scaled(fin_bed_frame.height);
-    Polygon     rect{{u_split, coord_t(0)}, {u_out, coord_t(0)}, {u_out, w_top}, {u_split, w_top}};
+    // 2D fin region: gizmo window + part shadow (design doc §15, revoking the earlier
+    // bbox-rectangle model in §6/§13). The gizmo rectangle window = [0,L] x [0,H] (anchor at
+    // u=0, i.e. the plane frame's own origin -- w=0 is the bed by contract) is the literal bound
+    // of where fin material may exist: WYSIWYG with the drawn gizmo rectangle. Within it,
+    // material is restricted to the part's "+u shadow" (never on the near side of the part, never
+    // above it), then filled straight down to the bed, then re-clipped to the gap clearance so
+    // overhanging part regions still keep their standoff. The flip (z_angle += PI, tested in
+    // test_fin.cpp) swaps which side is +u, so this single code path handles both sides.
+    BoundingBox bb        = get_extents(section);
+    coord_t     model_top = bb.max.y(); // part's own top at this plane (w, scaled)
+    coord_t     w_top     = std::min(scaled(fin_bed_frame.height), model_top);
+    if (w_top <= 0)
+        return TriangleMesh(); // window has no usable height at this plane
+    coord_t u_out = scaled(fin_bed_frame.length);
+    Polygon window_rect{{coord_t(0), coord_t(0)}, {u_out, coord_t(0)}, {u_out, w_top}, {coord_t(0), w_top}};
 
-    ExPolygons contour_gap = offset_ex(section, scaled<float>(fin_bed_frame.conn_gap));
-    ExPolygons fin2d       = diff_ex(Polygons{rect}, contour_gap);
+    ExPolygons offset_sec = offset_ex(section, scaled<float>(fin_bed_frame.conn_gap));
+
+    // Shadow: sweep the section's own silhouette along +u far enough to clear the window's far
+    // edge from the section's own nearest point (bb.min.x()), plus a 1mm margin -- comfortably
+    // covers the "sweep_len >= L + section width + margin" requirement regardless of how far the
+    // section sits from the window. sweep_ex() sweeps outer contours only, so holes can't punch a
+    // window into the shadow (see its doc comment).
+    coord_t    sweep_len_u = std::max(scaled(1.0), u_out - bb.min.x() + scaled(1.0));
+    ExPolygons far_shadow  = sweep_ex(section, Point(sweep_len_u, coord_t(0)));
+
+    ExPolygons candidate = intersection_ex(Polygons{window_rect}, far_shadow);
+    candidate            = diff_ex(candidate, offset_sec);
+    if (candidate.empty())
+        return TriangleMesh(); // window entirely inside the part+gap, or entirely on its near side
+
+    // Stand on the bed: sweep straight down past w=0 (sweep_len_w = w_top + margin always clears
+    // it), then re-clip to the window and re-carve the gap clearance -- otherwise an overhanging
+    // part region would get paved over by material filled down from a taller, thinner region
+    // directly above it (the two diff_ex() calls against offset_sec are deliberately not merged
+    // into one: the first bounds the shadow before it's filled downward, the second re-applies
+    // the same clearance to whatever the fill-down step produced).
+    coord_t    sweep_len_w = w_top + scaled(1.0);
+    ExPolygons filled      = sweep_ex(candidate, Point(coord_t(0), -sweep_len_w));
+
+    ExPolygons fin2d = intersection_ex(Polygons{window_rect}, filled);
+    fin2d            = diff_ex(fin2d, offset_sec);
     if (fin2d.empty())
-        return TriangleMesh(); // gap swallowed the whole rectangle -> no fin body
+        return TriangleMesh(); // gap re-carve consumed everything the fill-down step produced
 
     // Extrude fin2d into a solid prism along n (the plane normal), centered on the
     // fin plane: n in [-thickness/2, +thickness/2].
     indexed_triangle_set fin_local; // plane-frame coords (x=u, y=w, z=n), mm
     add_prism(fin_local, fin2d, -fin_bed_frame.thickness / 2., fin_bed_frame.thickness / 2.);
 
-    // Connector tabs (T00-01-05): small boxes bridging conn_gap, one row every
-    // conn_step mm along w, starting at the bed (w=0) up to and including
-    // height. Each tab is centered on the fin plane (n in [-line_width,
-    // +line_width], i.e. 2 perimeters wide) and reaches kTabOverlap past both
-    // the model's own surface and the fin wall's near face, so it overlaps both
-    // even though its_merge() below appends it as a topologically separate
-    // shell (no shared vertices with the wall -- see the VertexWelder comment
-    // above; that's fine here, tabs need not be welded to slice and print).
-    // A row with no material at that height (w above the model's own top)
-    // gets no tab -- contour_u_at() returns nullopt there (design doc §13.3).
-    constexpr double kTabOverlap = 0.1; // mm past the model surface / wall face, each side
+    // Connector tabs (design doc §15, revoking the earlier "always conn_gap wide" rule): small
+    // boxes bridging the fin's inner edge to the part's surface, one row every conn_step mm along
+    // w, starting at the bed (w=0) up to and including height. A row gets a tab only if (a) the
+    // section has material at that height (contour_u_at() returns a value) and (b) the part's
+    // surface is within conn_gap + kTabReachSlack of the fin's own inner edge -- the only way it
+    // isn't is the surface lying beyond the window's near edge ("part further out than the gizmo
+    // allows"), which the user confirmed should get no tab. kTabReachSlack tolerates the two
+    // independent computations (this closed-form d(w) vs. the fin2d polygon boolean ops) landing
+    // a hair apart. A row can also have no fin material at all (e.g. the window is fully consumed
+    // at that height) -- checked directly against fin2d rather than re-derived, since deriving it
+    // from d(w) alone would miss multi-component sections (see contour_u_at()'s own caveat).
+    constexpr double kTabOverlap    = 0.1; // mm past the model surface / fin inner edge, each side
+    constexpr double kTabReachSlack = 0.2; // mm tolerance for the d(w) <= gap reach check
     int n_rows = fin_connector_rows(fin_bed_frame);
     for (int k = 0; k < n_rows; ++k) {
-        double                w         = k * fin_bed_frame.conn_step;
-        std::optional<double> u_surface = contour_u_at(section, scaled(w), /*max_side=*/true);
+        double                 w         = k * fin_bed_frame.conn_step;
+        coord_t                w_scaled  = scaled(w);
+        std::optional<double>  u_surface = contour_u_at(section, w_scaled, /*max_side=*/true);
         if (!u_surface)
-            continue;
-        indexed_triangle_set tab = its_make_cube(fin_bed_frame.conn_gap + 2.0 * kTabOverlap, // u: span the gap + overlaps
-                                                  layer_height,                              // w: exactly one layer tall
-                                                  2.0 * line_width);                         // n: two perimeters thick
+            continue; // no material at this height -- nothing to bridge
+
+        double inner = std::min(std::max(*u_surface + fin_bed_frame.conn_gap, 0.0), fin_bed_frame.length);
+        double d     = inner - *u_surface;
+        if (d > fin_bed_frame.conn_gap + kTabReachSlack)
+            continue; // surface lies beyond the window's near edge -- gizmo doesn't reach that far
+        if (!contour_u_at(fin2d, w_scaled, /*max_side=*/true))
+            continue; // fin2d itself has no material at this row (e.g. window fully consumed)
+
+        double tab_len = d + 2.0 * kTabOverlap;
+        if (tab_len <= 0.0)
+            continue; // defensive: degenerate row (see contour_u_at()'s multi-component caveat)
+
+        indexed_triangle_set tab = its_make_cube(tab_len,           // u: spans surface..inner + overlaps
+                                                  layer_height,      // w: exactly one layer tall
+                                                  2.0 * line_width); // n: two perimeters thick
         its_translate(tab, Vec3f(float(*u_surface - kTabOverlap), float(w), float(-line_width)));
         its_merge(fin_local, tab);
     }
