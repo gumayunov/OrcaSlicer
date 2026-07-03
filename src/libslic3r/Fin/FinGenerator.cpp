@@ -51,6 +51,59 @@ int fin_connector_rows(const FinFeature& f)
     return int(std::floor(f.height / f.conn_step + 1e-9)) + 1;
 }
 
+std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed)
+{
+    // object-local anchor/azimuth -> bed frame (design §13.1-13.2):
+    // anchor: the transformed anchor point, XY only (z dropped, not projected along any
+    // normal -- to_bed already carries the instance's full 3D transform).
+    // azimuth: heading of the transformed u-axis, XY only (z dropped the same way).
+    Vec3d a_bed = to_bed * Vec3d(f.anchor_xy.x(), f.anchor_xy.y(), 0.);
+    Vec3d u_obj(-std::sin(f.z_angle), std::cos(f.z_angle), 0.);
+    Vec3d u_bed = to_bed.linear() * u_obj;
+    u_bed.z()   = 0.;
+    if (u_bed.norm() < EPSILON)
+        return std::nullopt; // degenerate (plane axis became vertical)
+
+    FinFeature g = f;
+    g.anchor_xy = Vec2d(a_bed.x(), a_bed.y());
+    g.z_angle   = std::atan2(-u_bed.x(), u_bed.y()); // inverse of u = (-sin a, cos a)
+    return g;
+}
+
+std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed)
+{
+    // Both anchor and azimuth invert through the upper-left 2x2 block of to_bed's linear part:
+    // fin_object_to_bed() maps an object-local (x, y[, implicit 0]) through to_bed and keeps
+    // only the resulting XY, so inverting it for a *point* means solving
+    //   A * (x, y) = a_bed.xy - translation.xy
+    // and for a *direction* (the azimuth's u-axis, translation-invariant) means solving
+    //   A * (x, y) ~ u_bed.xy  (proportional -- fin_object_to_bed() only reads u_bed's heading)
+    // where A is that same 2x2 block. Guard on its determinant: a singular A means to_bed
+    // squashes the object-local XY plane edge-on to the bed, and neither point can be solved.
+    const Matrix3d linear = to_bed.linear();
+    Matrix2d       A;
+    A << linear(0, 0), linear(0, 1), linear(1, 0), linear(1, 1);
+    const double det = A.determinant();
+    if (std::abs(det) < EPSILON)
+        return std::nullopt; // to_bed's XY block is (near) singular
+
+    const Matrix2d A_inv = A.inverse();
+
+    const Vec2d t_xy = to_bed.translation().head<2>();
+    const Vec2d xy   = A_inv * (f_bed.anchor_xy - t_xy);
+
+    const Vec2d u_bed_xy = Vec2d(-std::sin(f_bed.z_angle), std::cos(f_bed.z_angle));
+    Vec2d       v        = A_inv * u_bed_xy;
+    if (v.norm() < EPSILON)
+        return std::nullopt; // shouldn't happen once A is invertible and u_bed_xy != 0, but stay defensive
+    v.normalize();
+
+    FinFeature g = f_bed;
+    g.anchor_xy = xy;
+    g.z_angle   = std::atan2(-v.x(), v.y()); // inverse of u = (-sin a, cos a), mirrors fin_object_to_bed()
+    return g;
+}
+
 } // namespace FinGeneratorInternal
 
 namespace {
@@ -365,21 +418,11 @@ std::vector<TriangleMesh> generate_fin_meshes(const ModelObject& o, const Transf
         if (!f.enabled)
             continue;
 
-        // object-local anchor/azimuth -> bed frame (design §13.1-13.2):
-        // anchor: project the transformed anchor point to the bed plane.
-        // azimuth: heading of the transformed u-axis projected onto the bed plane.
-        Vec3d a_bed = to_bed * Vec3d(f.anchor_xy.x(), f.anchor_xy.y(), 0.);
-        Vec3d u_obj(-std::sin(f.z_angle), std::cos(f.z_angle), 0.);
-        Vec3d u_bed = to_bed.linear() * u_obj;
-        u_bed.z()   = 0.;
-        if (u_bed.norm() < EPSILON)
+        std::optional<FinFeature> g = fin_object_to_bed(f, to_bed);
+        if (!g)
             continue; // degenerate (plane axis became vertical) -> skip fin
 
-        FinFeature g = f;
-        g.anchor_xy = Vec2d(a_bed.x(), a_bed.y());
-        g.z_angle   = std::atan2(-u_bed.x(), u_bed.y()); // inverse of u = (-sin a, cos a)
-
-        TriangleMesh mesh = generate_one_fin(solid, g, layer_height, line_width);
+        TriangleMesh mesh = generate_one_fin(solid, *g, layer_height, line_width);
         if (!mesh.empty())
             out.push_back(std::move(mesh));
     }

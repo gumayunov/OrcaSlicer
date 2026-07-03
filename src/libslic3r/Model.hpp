@@ -353,6 +353,17 @@ struct FinFeature {
     template<class Archive> void serialize(Archive& ar) {
         ar(anchor_xy, z_angle, height, length, thickness, conn_step, conn_gap, enabled);
     }
+
+    // Exact field-wise comparison (used by model_fins_data_changed() to detect edits between
+    // Print::apply()'s old/new model copies -- both sides are plain struct copies, never
+    // recomputed via trig round-trips, so exact equality is deterministic here).
+    bool operator==(const FinFeature& rhs) const
+    {
+        return anchor_xy == rhs.anchor_xy && z_angle == rhs.z_angle && height == rhs.height &&
+               length == rhs.length && thickness == rhs.thickness && conn_step == rhs.conn_step &&
+               conn_gap == rhs.conn_gap && enabled == rhs.enabled;
+    }
+    bool operator!=(const FinFeature& rhs) const { return !(*this == rhs); }
 };
 using FinFeatures = std::vector<FinFeature>;
 
@@ -1801,6 +1812,10 @@ extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const Mod
 extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+
+// Test whether the fins list (ModelObject::fins) differs between the old and new ModelObject.
+// The function assumes the volumes list is synchronized (mirrors model_brim_points_data_changed).
+bool model_fins_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // If the model has multi-part objects, then it is currently not supported by the SLA mode.
 // Either the model cannot be loaded, or a SLA printer has to be activated.

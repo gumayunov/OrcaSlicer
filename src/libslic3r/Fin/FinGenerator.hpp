@@ -5,6 +5,7 @@
 // (also provides indexed_triangle_set).
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -51,6 +52,26 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
 // at that height (above the model's own top) is still counted here -- it is
 // generate_one_fin() that skips emitting a tab for it (design doc §13.3).
 int fin_connector_rows(const FinFeature& f);
+
+// Object-local -> bed-frame conversion of `f`'s anchor_xy/z_angle only; every other field
+// passes through unchanged (design doc §13.1-13.2). This is generate_fin_meshes()'s per-fin
+// conversion step, factored out here so it is unit-testable and shared with its inverse below
+// (the gizmo, T00-04-05, uses both directions: this one to display an existing fin, the other
+// to persist an edit). Returns nullopt when `to_bed` degenerates the object-local u axis onto
+// world Z (e.g. the instance is tipped so the fin's plane axis becomes vertical) -- the
+// caller's signal to skip the fin, exactly as generate_fin_meshes() did inline before this
+// helper existed.
+std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed);
+
+// Bed-frame -> object-local conversion of `f_bed`'s anchor_xy/z_angle (inverse of
+// fin_object_to_bed). Both anchor and azimuth invert through the same 2x2 linear system built
+// from `to_bed`'s XY block (see the .cpp for the derivation), so that for any `to_bed` whose XY
+// block is non-singular:
+//   fin_object_to_bed(*fin_bed_to_object(f_bed, to_bed), to_bed)
+// reproduces f_bed's anchor_xy/z_angle exactly. Returns nullopt when that XY block is (near)
+// singular -- e.g. the instance is rotated so its local XY plane projects edge-on to the bed --
+// the caller's signal to fall back to defaults.
+std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed);
 
 } // namespace FinGeneratorInternal
 

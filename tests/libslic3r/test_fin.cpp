@@ -290,6 +290,134 @@ TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
     CHECK_THAT(p.z(), WithinAbs(2.0, 1e-9));
 }
 
+// --- FinGenerator: object <-> bed (world) conversion (T00-04-05) -----------
+//
+// fin_object_to_bed()/fin_bed_to_object() are the gizmo's coordinate contract (design doc §13,
+// the T00-04-04 review note): the gizmo edits a fin in the BED (world) frame, but
+// ModelObject::fins stores it OBJECT-LOCAL. fin_object_to_bed() is generate_fin_meshes()'s own
+// per-fin conversion (object -> bed, used to load an existing fin into the gizmo);
+// fin_bed_to_object() is its inverse (bed -> object, used to persist a gizmo edit). Both touch
+// only anchor_xy/z_angle -- the other fields are asserted here too, to catch a field getting
+// dropped by accident, even though the conversion itself never touches them.
+
+namespace {
+
+// Arbitrary, mutually distinct values for every field (incl. enabled=false, the non-default
+// bool) so a field-dropping bug can't hide behind a default-initialized match.
+FinFeature roundtrip_test_fin()
+{
+    FinFeature f;
+    f.anchor_xy = Vec2d(3.25, -6.75);
+    f.z_angle   = 0.6; // within atan2's (-pi, pi] range, so no wrap ambiguity vs. the recovered angle
+    f.height    = 17.5;
+    f.length    = 9.25;
+    f.thickness = 0.85;
+    f.conn_step = 3.5;
+    f.conn_gap  = 1.35;
+    f.enabled   = false;
+    return f;
+}
+
+void check_fins_match(const FinFeature& a, const FinFeature& b, double eps = 1e-9)
+{
+    CHECK_THAT(a.anchor_xy.x(), WithinAbs(b.anchor_xy.x(), eps));
+    CHECK_THAT(a.anchor_xy.y(), WithinAbs(b.anchor_xy.y(), eps));
+    CHECK_THAT(a.z_angle, WithinAbs(b.z_angle, eps));
+    CHECK_THAT(a.height, WithinAbs(b.height, eps));
+    CHECK_THAT(a.length, WithinAbs(b.length, eps));
+    CHECK_THAT(a.thickness, WithinAbs(b.thickness, eps));
+    CHECK_THAT(a.conn_step, WithinAbs(b.conn_step, eps));
+    CHECK_THAT(a.conn_gap, WithinAbs(b.conn_gap, eps));
+    CHECK(a.enabled == b.enabled);
+}
+
+} // namespace
+
+TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: identity to_bed", "[fin]")
+{
+    using namespace FinGeneratorInternal;
+
+    FinFeature f_obj = roundtrip_test_fin();
+
+    std::optional<FinFeature> f_bed = fin_object_to_bed(f_obj, Transform3d::Identity());
+    REQUIRE(f_bed.has_value());
+
+    std::optional<FinFeature> f_obj2 = fin_bed_to_object(*f_bed, Transform3d::Identity());
+    REQUIRE(f_obj2.has_value());
+
+    check_fins_match(f_obj, *f_obj2);
+}
+
+TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: translated + Z-rotated instance", "[fin]")
+{
+    using namespace FinGeneratorInternal;
+
+    Transform3d to_bed = Transform3d::Identity();
+    to_bed.translate(Vec3d(12.0, -7.0, 3.0));
+    to_bed.rotate(Eigen::AngleAxisd(1.1, Vec3d::UnitZ()));
+
+    FinFeature f_obj = roundtrip_test_fin();
+
+    std::optional<FinFeature> f_bed = fin_object_to_bed(f_obj, to_bed);
+    REQUIRE(f_bed.has_value());
+
+    std::optional<FinFeature> f_obj2 = fin_bed_to_object(*f_bed, to_bed);
+    REQUIRE(f_obj2.has_value());
+
+    check_fins_match(f_obj, *f_obj2);
+}
+
+TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: instance tipped 30deg about X", "[fin]")
+{
+    // A partial (non-90deg) tip about a horizontal in-plane axis: the object-local XY plane no
+    // longer projects flush onto the bed, but the projection stays full-rank (its 2x2 XY block's
+    // determinant is cos(30deg) != 0, unlike the exact-90deg case below), so both the anchor and
+    // the azimuth stay recoverable.
+    using namespace FinGeneratorInternal;
+
+    Transform3d to_bed(Eigen::AngleAxisd(PI / 6.0, Vec3d::UnitX())); // 30deg
+
+    FinFeature f_obj = roundtrip_test_fin();
+
+    std::optional<FinFeature> f_bed = fin_object_to_bed(f_obj, to_bed);
+    REQUIRE(f_bed.has_value());
+
+    std::optional<FinFeature> f_obj2 = fin_bed_to_object(*f_bed, to_bed);
+    REQUIRE(f_obj2.has_value());
+
+    check_fins_match(f_obj, *f_obj2);
+}
+
+TEST_CASE("fin_object_to_bed returns nullopt when the object-local u axis becomes vertical", "[fin]")
+{
+    // Instance tipped exactly 90deg about X: object-local +Y (z_angle=0's u axis) maps entirely
+    // onto world Z, so no bed-frame azimuth exists (mirrors the "instance tipped 90deg about X"
+    // generate_fin_meshes test, but exercised directly against the helper it now calls).
+    using namespace FinGeneratorInternal;
+
+    Transform3d to_bed(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
+    FinFeature  f = roundtrip_test_fin();
+    f.z_angle     = 0.0;
+
+    CHECK_FALSE(fin_object_to_bed(f, to_bed).has_value());
+}
+
+TEST_CASE("fin_bed_to_object returns nullopt when to_bed's XY block is singular", "[fin]")
+{
+    // Same instance tip as above (exactly 90deg about X): the object-local anchor is no longer
+    // recoverable from ANY bed-frame anchor at all -- a_bed's Y component collapses to a
+    // constant (to_bed's own translation.y()) independent of the object-local point, so the 2x2
+    // system fin_bed_to_object() solves is singular regardless of the fin's azimuth. Distinct
+    // from (though, for this particular to_bed, numerically coincident with) the azimuth
+    // degeneracy above: this one is a property of to_bed alone, not of any particular FinFeature.
+    using namespace FinGeneratorInternal;
+
+    Transform3d to_bed(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
+    FinFeature  f_bed = roundtrip_test_fin();
+
+    CHECK_FALSE(fin_bed_to_object(f_bed, to_bed).has_value());
+}
+
 // --- FinGenerator: solid assembly ------------------------------------------
 
 TEST_CASE("object_solid_bed merges MODEL_PART volumes and skips other types", "[fin]")

@@ -3753,6 +3753,17 @@ bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo
     return false;
 }
 
+bool model_fins_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    if (mo.fins.size() != mo_new.fins.size())
+        return true;
+    for (size_t i = 0; i < mo.fins.size(); ++i) {
+        if (mo.fins[i] != mo_new.fins[i])
+            return true;
+    }
+    return false;
+}
+
 bool model_has_multi_part_objects(const Model &model)
 {
     for (const ModelObject *model_object : model.objects)

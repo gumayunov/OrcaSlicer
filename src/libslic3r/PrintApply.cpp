@@ -1418,6 +1418,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
         bool model_origin_translation_differ = model_object.origin_translation != model_object_new.origin_translation;
         bool brim_points_differ = model_brim_points_data_changed(model_object, model_object_new);
+        bool fins_differ        = model_fins_data_changed(model_object, model_object_new);
         auto print_objects_range        = print_object_status_db.get_range(model_object);
         // The list actually can be empty if all instances are out of the print bed.
         //assert(print_objects_range.begin() != print_objects_range.end());
@@ -1466,6 +1467,15 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             }
             if (brim_points_differ) {
                 model_object.brim_points = model_object_new.brim_points;
+                update_apply_status(this->invalidate_all_steps());
+            }
+            if (fins_differ) {
+                // Fins are generated straight into the sliced mesh at posSlice (see
+                // TransientFinGuard in PrintObjectSlice.cpp) -- there is no dedicated fin
+                // pipeline step to invalidate individually, so mirror brim_points_differ above
+                // and invalidate everything. No-op (this branch never runs) when fins didn't
+                // change, so unrelated edits keep their existing, narrower invalidation.
+                model_object.fins = model_object_new.fins;
                 update_apply_status(this->invalidate_all_steps());
             }
         }
