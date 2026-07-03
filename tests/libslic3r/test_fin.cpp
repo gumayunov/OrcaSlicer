@@ -612,11 +612,18 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     // w=0. volume = area * thickness confirms both the extrusion geometry and the winding (a
     // flipped/self-intersecting prism would not match this exactly).
     double wall_volume = 75.0 * f.thickness;
-    // Each tab spans d(w) + 2*kTabOverlap along u, d(w) = inner(w) - surface_u(w) (generate_one_fin,
-    // design doc §15). Here surface_u=10 and inner=min(surface_u+conn_gap, length)=11 (the window
-    // doesn't clamp it, since length=16 > 11), so d=conn_gap=1.0 exactly like the pre-§15 formula --
-    // same its_make_cube(conn_gap + 0.2, layer_height, 2*line_width) as before.
-    double tab_volume      = (f.conn_gap + 0.2) * layer_height * (2.0 * line_width);
+    // Each tab spans d(w) + model_overlap + fin_overlap along u, d(w) = inner(w) - surface_u(w)
+    // (generate_one_fin, design doc §15 + the T00-05-01 penetration-depth fix). model_overlap =
+    // max(kTabOverlap, line_width) is the reach INTO the model (deep enough to clear its own
+    // outer wall line, not just its surface line); fin_overlap = layer_height + kTabOverlap is
+    // the reach INTO the fin body (deep enough to survive a sloped fin inner face receding over
+    // one tab's own height -- see the tilted-slab test for the sloped case itself). Here
+    // surface_u=10, conn_gap=1.0, inner=min(surface_u+conn_gap, length)=11 (length=16 doesn't
+    // clamp it), so d=1.0, model_overlap=max(0.1, 0.45)=0.45, fin_overlap=0.2+0.1=0.3, and
+    // tab_len = 1.0 + 0.45 + 0.3 = 1.75 (up from the pre-fix 1.0 + 2*0.1 = 1.2).
+    double model_overlap   = std::max(0.1, line_width); // must match generate_one_fin()'s kTabOverlap/line_width rule
+    double fin_overlap     = layer_height + 0.1;         // must match generate_one_fin()'s layer_height + kTabOverlap rule
+    double tab_volume      = (f.conn_gap + model_overlap + fin_overlap) * layer_height * (2.0 * line_width);
     double expected_volume = wall_volume + n_tab_rows * tab_volume;
     CHECK_THAT(m.volume(), WithinAbs(expected_volume, 0.05));
 }
@@ -773,15 +780,19 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
     f.conn_step = 2.0;
     f.conn_gap  = 1.0;
 
-    TriangleMesh m = generate_one_fin(slab, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    double layer_height = 0.2, line_width = 0.45;
+    TriangleMesh m = generate_one_fin(slab, f, layer_height, line_width);
     REQUIRE_FALSE(m.empty());
 
-    constexpr double kTabOverlap    = 0.1; // must match generate_one_fin()'s own constant
+    constexpr double kTabOverlap    = 0.1; // must match generate_one_fin()'s own floor constant
     constexpr double kTabReachSlack = 0.2; // must match generate_one_fin()'s own constant
     constexpr double kSlack         = 0.3; // generous epsilon: float32 mesh vertices + kTabReachSlack
+    // Model-side tab reach (T00-05-01): max(kTabOverlap, line_width), must match generate_one_fin()'s
+    // own model_overlap -- line_width (0.45) dominates kTabOverlap (0.1) here.
+    double model_overlap = std::max(kTabOverlap, line_width);
 
     // (a) no fin vertex on the near side, and (b) none above the slab's own top: every vertex's u
-    // (== bed-frame Y, since z_angle=0) must be within [surface_u(w) - kTabOverlap, +inf) of the
+    // (== bed-frame Y, since z_angle=0) must be within [surface_u(w) - model_overlap, +inf) of the
     // surface at that height (w == bed-frame Z, must itself fall within [0, D.z()] -- f.height asks
     // for more, see above, so a vertex above D.z() would be a real capping-bug regression, not a
     // legitimate tall fin).
@@ -789,7 +800,7 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
         double w = double(v.z());
         CHECK(w >= -kSlack);
         CHECK(w <= D.z() + kSlack);
-        CHECK(double(v.y()) >= surface_u_at(w) - kTabOverlap - kSlack);
+        CHECK(double(v.y()) >= surface_u_at(w) - model_overlap - kSlack);
     }
 
     // (d) stands on the bed.
@@ -867,6 +878,75 @@ TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-
     CHECK_THAT(m.volume(), WithinAbs(150.0 * f.thickness, 0.5));
 }
 
+// --- FinGenerator: tab penetration depths (T00-05-01) -----------------------
+
+TEST_CASE("fin: tab penetration follows max(kTabOverlap, line_width) into the model and "
+          "layer_height + kTabOverlap into the fin, clamped to the window's outer edge",
+          "[fin]")
+{
+    // 2026-07-03 user report (progress.md): a flat kTabOverlap=0.1mm on both sides under-reached
+    // -- into the model it landed inside the outer wall LINE (tabs sliced as overhang "in the
+    // air"), and into the fin it could miss a sloped inner face entirely (see the tilted-slab
+    // test for that case). This axis-aligned fixture isolates the two depths and the far-edge
+    // clamp with simple, exact numbers.
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f)); // surface_u = 10 for every row
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 5.0;
+    f.length    = 16.0;   // comfortably beyond inner(w) -- the wall body's own far edge, not the tab's
+    f.conn_step = 100.0;  // only the w=0 row -- isolates exactly one tab
+    f.conn_gap  = 1.0;
+
+    SECTION("line_width bigger than the old flat kTabOverlap dominates the model-side reach")
+    {
+        double layer_height = 0.25, line_width = 0.6; // line_width > kTabOverlap(0.1): must dominate
+        TriangleMesh m = generate_one_fin(cube, f, layer_height, line_width);
+        REQUIRE_FALSE(m.empty());
+        REQUIRE(m.stats().number_of_parts == 2); // wall + exactly one tab
+        CHECK(m.stats().open_edges == 0);
+
+        // surface_u=10, inner=min(surface_u+conn_gap,length)=11 (length=16 doesn't clamp).
+        double model_overlap = std::max(0.1, line_width); // == line_width (0.6) here
+        double fin_overlap   = layer_height + 0.1;         // == 0.35
+        BoundingBoxf3 bb = m.bounding_box();
+        // The tab is the ONLY geometry reaching below u=11 (the wall body itself spans
+        // [11, 16]), so bb.min.y() pins the model-side depth unambiguously.
+        CHECK_THAT(bb.min.y(), WithinAbs(10.0 - model_overlap, 1e-3));
+
+        double wall_area   = 5.0 * f.height; // fin2d = u in [11,16] x w in [0,5]
+        double wall_volume = wall_area * f.thickness;
+        double tab_len     = (f.conn_gap) + model_overlap + fin_overlap; // d + model_overlap + fin_overlap
+        double tab_volume  = tab_len * layer_height * (2.0 * line_width);
+        CHECK_THAT(m.volume(), WithinAbs(wall_volume + tab_volume, 0.01));
+    }
+
+    SECTION("fin-side reach is clamped to the window's own outer edge (u = length) on a thin fin")
+    {
+        // length picked so inner(=11) + fin_overlap(=0.4) would overshoot length -- the tab's far
+        // end must clamp to length exactly, never past material the window never generated.
+        FinFeature g = f;
+        g.length     = 11.3; // in (11, 11.4): thin wall (0.3mm), but still enough room for one to exist
+        g.height     = 3.0;
+
+        double layer_height = 0.3, line_width = 0.2;
+        TriangleMesh m = generate_one_fin(cube, g, layer_height, line_width);
+        REQUIRE_FALSE(m.empty());
+        REQUIRE(m.stats().number_of_parts == 2);
+        CHECK(m.stats().open_edges == 0);
+
+        double model_overlap = std::max(0.1, line_width); // == 0.2
+        BoundingBoxf3 bb = m.bounding_box();
+        CHECK_THAT(bb.min.y(), WithinAbs(10.0 - model_overlap, 1e-3)); // tab's near end
+        // Unclamped this would be inner(11) + fin_overlap(0.4) = 11.4, past the window -- the
+        // clamp caps it at g.length(11.3), which is also exactly the (razor-thin) wall's own far
+        // edge, so bb.max.y() pins the clamp directly.
+        CHECK_THAT(bb.max.y(), WithinAbs(g.length, 1e-3));
+    }
+}
+
 // --- FinGenerator: generate_fin_meshes, object -> bed conversion ------------
 //
 // Pins down the anchor/azimuth conversion under a non-identity `to_bed`
@@ -884,7 +964,8 @@ TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-
 // value, would land the whole window inside the part+gap -> empty, breaking every test below).
 // fin body spans [11, 16] along +u beyond the section (u=16 is exactly the window's own right
 // edge now, rather than "surface + length" under the old bbox model -- see generate_one_fin()),
-// tabs bridge the gap starting at face-0.1 (kTabOverlap), so the mesh spans ~[9.9, 16] along the
+// tabs bridge the gap starting at face-model_overlap (T00-05-01: max(kTabOverlap, line_width) =
+// max(0.1, 0.45) = 0.45 with the line_width used below), so the mesh spans ~[9.55, 16] along the
 // fin direction, [-0.6, 0.6] across (thickness), and [0, 10] in z. These numbers are unchanged
 // from before the §15 rework (only `length` moved, from 6 to 16, to compensate for the window now
 // being measured from the anchor instead of from the section's own edge).
@@ -925,7 +1006,7 @@ TEST_CASE("generate_fin_meshes: instance Z rotation turns the fin azimuth", "[fi
 
         BoundingBoxf3 bb = fins.front().bounding_box();
         CHECK_THAT(bb.max.y(), WithinAbs(16.0, 1e-3)); // +u == +Y at z_angle = 0
-        CHECK_THAT(bb.min.y(), WithinAbs(9.9, 1e-3));  // tabs reach kTabOverlap into the cube
+        CHECK_THAT(bb.min.y(), WithinAbs(9.55, 1e-3)); // tabs reach max(kTabOverlap, line_width) into the cube (T00-05-01)
         CHECK_THAT(bb.size().x(), WithinAbs(1.2, 1e-3)); // thickness across the plane
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));
@@ -942,7 +1023,7 @@ TEST_CASE("generate_fin_meshes: instance Z rotation turns the fin azimuth", "[fi
 
         BoundingBoxf3 bb = fins.front().bounding_box();
         CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3)); // +u == -X now
-        CHECK_THAT(bb.max.x(), WithinAbs(-9.9, 1e-3));
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // T00-05-01: max(kTabOverlap, line_width) reach
         CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // still standing on the bed
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // still exactly `height` tall
@@ -984,7 +1065,7 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // starts at the bed
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // exactly `height` tall
         CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3));  // beyond the cube's -X face
-        CHECK_THAT(bb.max.x(), WithinAbs(-9.9, 1e-3));
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // T00-05-01: max(kTabOverlap, line_width) reach
         CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
     }
 

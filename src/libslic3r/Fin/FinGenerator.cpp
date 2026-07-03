@@ -366,7 +366,23 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     // a hair apart. A row can also have no fin material at all (e.g. the window is fully consumed
     // at that height) -- checked directly against fin2d rather than re-derived, since deriving it
     // from d(w) alone would miss multi-component sections (see contour_u_at()'s own caveat).
-    constexpr double kTabOverlap    = 0.1; // mm past the model surface / fin inner edge, each side
+    //
+    // Penetration depths (2026-07-03 user report, progress.md): each side of the tab must reach
+    // past its own "surface" by more than the old flat kTabOverlap=0.1mm, for two independent
+    // reasons --
+    //  - Model side: 0.1mm can land inside the model's own outer perimeter LINE (not yet solid
+    //    material), so the tab's first extrusions have nothing under them and slice as an
+    //    overhang ("in the air" in the G-code preview). `line_width` is the same representative
+    //    wall width the caller already resolves for the tab's own thickness (2*line_width below;
+    //    see PrintObjectSlice.cpp's TransientFinGuard) -- reusing it here guarantees model-side
+    //    penetration is at least one full wall line deep, never less than the old kTabOverlap.
+    //  - Fin side: on a sloped inner edge (a tilted part), the fin's own inner face recedes by
+    //    roughly slope*layer_height over the tab's own (single-layer) height, so a fixed 0.1mm
+    //    can undershoot and miss the fin body entirely at steep slopes. A conservative constant
+    //    depth of layer_height + kTabOverlap covers any slope without computing the real per-row
+    //    value; clamped to the window's own outer edge (u = length) so a thin fin (length close
+    //    to conn_gap) never has its tab reach past material that was never generated.
+    constexpr double kTabOverlap    = 0.1; // mm past the model surface / fin inner edge, floor value (each side)
     constexpr double kTabReachSlack = 0.2; // mm tolerance for the d(w) <= gap reach check
     int n_rows = fin_connector_rows(fin_bed_frame);
     for (int k = 0; k < n_rows; ++k) {
@@ -383,14 +399,18 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
         if (!contour_u_at(fin2d, w_scaled, /*max_side=*/true))
             continue; // fin2d itself has no material at this row (e.g. window fully consumed)
 
-        double tab_len = d + 2.0 * kTabOverlap;
+        double model_overlap = std::max(kTabOverlap, line_width);                    // into the part
+        double fin_overlap   = layer_height + kTabOverlap;                           // into the fin body
+        double tab_start     = *u_surface - model_overlap;
+        double tab_end       = std::min(inner + fin_overlap, fin_bed_frame.length);  // never past the window's own edge
+        double tab_len       = tab_end - tab_start;
         if (tab_len <= 0.0)
             continue; // defensive: degenerate row (see contour_u_at()'s multi-component caveat)
 
-        indexed_triangle_set tab = its_make_cube(tab_len,           // u: spans surface..inner + overlaps
+        indexed_triangle_set tab = its_make_cube(tab_len,           // u: spans surface-model_overlap..inner+fin_overlap (clamped)
                                                   layer_height,      // w: exactly one layer tall
                                                   2.0 * line_width); // n: two perimeters thick
-        its_translate(tab, Vec3f(float(*u_surface - kTabOverlap), float(w), float(-line_width)));
+        its_translate(tab, Vec3f(float(tab_start), float(w), float(-line_width)));
         its_merge(fin_local, tab);
     }
 
