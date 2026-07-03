@@ -47,11 +47,15 @@ Transform3d bed_to_plane(const FinFeature& f);
 // (pass Transform3d::Identity() when the object is already given in the bed frame).
 indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform3d& to_bed);
 
-// Number of connector-tab rows: one every conn_step mm along the fin's height,
-// starting at w=0 (the bed) up to and including height. A row with no material
-// at that height (above the model's own top) is still counted here -- it is
-// generate_one_fin() that skips emitting a tab for it (design doc §13.3).
-int fin_connector_rows(const FinFeature& f);
+// Number of connector-tab rows: one every effective_step mm along the fin's height, starting at
+// w=0 (the bed) up to and including height, where effective_step = max(f.conn_step, layer_height)
+// (phase 05 edge case: a conn_step smaller than one layer would otherwise request more rows than
+// the object even has layers, producing duplicate/vertically-overlapping tab geometry at
+// effectively the same height -- clamping the row spacing to at least one layer avoids that
+// without capping the row COUNT directly, which would silently shrink the fin's own top row).
+// A row with no material at that height (above the model's own top) is still counted here -- it
+// is generate_one_fin() that skips emitting a tab for it (design doc §13.3).
+int fin_connector_rows(const FinFeature& f, double layer_height);
 
 // Object-local -> bed-frame conversion of `f`'s anchor_xy/z_angle only; every other field
 // passes through unchanged (design doc §13.1-13.2). This is generate_fin_meshes()'s per-fin

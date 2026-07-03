@@ -598,7 +598,7 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     // row, not 1: rows are w = 0, 4, 8, 12 (floor(15/4)+1 = 4 rows, conn_step=4
     // default), all <= height=15 and all within the cube's full w in [0,30]
     // cross-section, so every row gets a tab.
-    int n_tab_rows = FinGeneratorInternal::fin_connector_rows(f);
+    int n_tab_rows = FinGeneratorInternal::fin_connector_rows(f, layer_height);
     REQUIRE(n_tab_rows == 4);
     CHECK(m.stats().number_of_parts == 1 + n_tab_rows); // one shell + one per tab
 
@@ -635,10 +635,25 @@ TEST_CASE("fin: fin_connector_rows == floor(H/X) + 1", "[fin]")
     FinFeature f;
     f.height    = 20.0;
     f.conn_step = 5.0;
-    CHECK(FinGeneratorInternal::fin_connector_rows(f) == 5); // w = 0,5,10,15,20
+    CHECK(FinGeneratorInternal::fin_connector_rows(f, 0.2) == 5); // w = 0,5,10,15,20
 
     f.conn_step = 100.0;
-    CHECK(FinGeneratorInternal::fin_connector_rows(f) == 1); // only w = 0
+    CHECK(FinGeneratorInternal::fin_connector_rows(f, 0.2) == 1); // only w = 0
+}
+
+TEST_CASE("fin: fin_connector_rows clamps row spacing to at least one layer", "[fin]")
+{
+    // Phase 05 edge case: conn_step (0.1) smaller than layer_height (0.2) must not literally
+    // floor(H/conn_step)+1 = 201 rows -- effective_step = max(conn_step, layer_height) = 0.2
+    // clamps it to what the object can actually resolve into distinct, non-overlapping rows.
+    FinFeature f;
+    f.height    = 20.0;
+    f.conn_step = 0.1;
+    CHECK(FinGeneratorInternal::fin_connector_rows(f, 0.2) == 101); // floor(20/0.2)+1, not floor(20/0.1)+1=201
+
+    // conn_step already >= layer_height: unaffected, same as the un-clamped formula.
+    f.conn_step = 5.0;
+    CHECK(FinGeneratorInternal::fin_connector_rows(f, 0.2) == 5);
 }
 
 TEST_CASE("fin: connector count = floor(H/X)+1", "[fin]")
@@ -807,11 +822,14 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
     CHECK_THAT(m.bounding_box().min.z(), WithinAbs(0.0, 0.5));
 
     // (c) tabs only where the surface is within conn_gap + kTabReachSlack of the fin's inner edge
-    // -- computed the same way generate_one_fin() does, from surface_u_strict() above.
-    int n_rows         = FinGeneratorInternal::fin_connector_rows(f);
+    // -- computed the same way generate_one_fin() does, from surface_u_strict() above. Row height
+    // uses effective_step = max(conn_step, layer_height) (phase 05 clamp), same as conn_step here
+    // since conn_step(2.0) > layer_height(0.2).
+    double effective_step = std::max(f.conn_step, layer_height);
+    int n_rows         = FinGeneratorInternal::fin_connector_rows(f, layer_height);
     int expected_tabs  = 0;
     for (int k = 0; k < n_rows; ++k) {
-        std::optional<double> surface = surface_u_strict(k * f.conn_step);
+        std::optional<double> surface = surface_u_strict(k * effective_step);
         if (!surface)
             continue; // above the slab's own top -- no material, no tab
         double inner = std::min(std::max(*surface + f.conn_gap, 0.0), f.length);
@@ -944,6 +962,149 @@ TEST_CASE("fin: tab penetration follows max(kTabOverlap, line_width) into the mo
         // clamp caps it at g.length(11.3), which is also exactly the (razor-thin) wall's own far
         // edge, so bb.max.y() pins the clamp directly.
         CHECK_THAT(bb.max.y(), WithinAbs(g.length, 1e-3));
+    }
+}
+
+// --- FinGenerator: multiple disjoint cross-sections (phase 05 edge case) ---
+
+TEST_CASE("fin: two disjoint pillars in the section -- shadow/tabs measure the outermost lobe", "[fin]")
+{
+    // Two separate pillars straddling the fin's cutting plane (world X=0 at z_angle=0, anchor
+    // (0,0)): a near one (world Y in [3,5]) and a far one (world Y in [6.5,8.5]), both spanning
+    // the same Z range -- slicing the merged solid at X=0 yields TWO disjoint rectangles in the
+    // (u,w) section, the "multiple disjoint cross-sections" edge case (phase 05 plan). The 1.5mm
+    // gap between them (5 to 6.5) is narrower than 2*conn_gap(1.0), so their conn_gap offsets
+    // overlap and diff_ex() carves a single clean shadow region -- keeps this fixture's own
+    // expected geometry simple while still exercising a genuinely 2-component section.
+    //
+    // Documents the known limitation already called out in contour_u_at()'s doc comment
+    // (FinGenerator.cpp): the extreme-u scan returns the OUTERMOST lobe's surface for tab
+    // placement (the far pillar's u=8.5), regardless of a nearer lobe existing at the same
+    // height (the near pillar's u=5.0) -- this test pins that current behavior, it does not
+    // change it (see design.md's own future-work note on multi-fin/multi-lobe support).
+    indexed_triangle_set near_pillar = its_make_cube(2, 2, 10); // -> world Y in [3,5], Z in [0,10]
+    its_translate(near_pillar, Vec3f(-1.f, 3.f, 0.f));
+    indexed_triangle_set far_pillar = its_make_cube(2, 2, 10); // -> world Y in [6.5,8.5], Z in [0,10]
+    its_translate(far_pillar, Vec3f(-1.f, 6.5f, 0.f));
+
+    indexed_triangle_set solid = near_pillar;
+    its_merge(solid, far_pillar);
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 10.0;
+    f.length    = 16.0; // clears the far lobe's surface (8.5) + gap (1.0) = 9.5, with room to spare
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    double layer_height = 0.2, line_width = 0.45;
+    TriangleMesh m = generate_one_fin(solid, f, layer_height, line_width);
+    REQUIRE_FALSE(m.empty());
+    CHECK(m.stats().open_edges == 0);
+    CHECK_THAT(m.bounding_box().size().z(), WithinAbs(10.0, 0.5));
+
+    // Rows w=0,5,10 (fin_connector_rows(f, layer_height) == 3) all fall within both pillars' own
+    // height (0..10), so all three get a tab measured against the FAR lobe's surface (8.5), not
+    // the near one's (5.0).
+    REQUIRE(FinGeneratorInternal::fin_connector_rows(f, layer_height) == 3);
+    CHECK(m.stats().number_of_parts == 1 + 3); // wall + 3 tabs
+
+    // The far-lobe surface (8.5) is what the tab's model-side reach is measured from; had the
+    // near lobe (5.0) been (incorrectly) used instead, this would come out around 4.55, not 8.05.
+    double model_overlap = std::max(0.1, line_width);
+    CHECK_THAT(m.bounding_box().min.y(), WithinAbs(8.5 - model_overlap, 1e-3));
+}
+
+// --- FinGenerator: very small conn_step vs. layer_height (phase 05 edge case) ---
+
+TEST_CASE("fin: conn_step smaller than layer_height does not produce overlapping/duplicate tab rows", "[fin]")
+{
+    // Before the fin_connector_rows()/generate_one_fin() clamp (T00-05-01), conn_step=0.1 with a
+    // 0.2mm layer_height would have asked for floor(2.0/0.1)+1 = 21 rows spaced 0.1mm apart -- each
+    // tab is itself `layer_height` (0.2mm) tall, so consecutive rows would emit vertically
+    // overlapping/duplicate tab slabs. effective_step = max(conn_step, layer_height) = 0.2 clamps
+    // that to the object's actual layer resolution: 11 rows (w = 0, 0.2, ..., 2.0), each tab
+    // touching but not overlapping its neighbor (row k's top == row k+1's bottom).
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f)); // surface_u = 10 for every row, full 20mm height
+
+    FinFeature f;
+    f.anchor_xy = Vec2d(0.0, 0.0);
+    f.z_angle   = 0.0;
+    f.height    = 2.0;
+    f.length    = 16.0;
+    f.conn_step = 0.1; // smaller than layer_height below
+    f.conn_gap  = 1.0;
+
+    double layer_height = 0.2, line_width = 0.45;
+    REQUIRE(FinGeneratorInternal::fin_connector_rows(f, layer_height) == 11); // floor(2/0.2)+1, not floor(2/0.1)+1=21
+
+    TriangleMesh m = generate_one_fin(cube, f, layer_height, line_width);
+    REQUIRE_FALSE(m.empty());
+    CHECK(m.stats().open_edges == 0);
+    // 1 wall + 11 tabs (every row has material within the cube's own 20mm height and reaches the
+    // gap within kTabReachSlack, same as the axis-aligned tests above) -- NOT 1+21.
+    CHECK(m.stats().number_of_parts == 1 + 11);
+}
+
+// --- FinGenerator: negative/zero parameters (T00-01-03 review note) --------
+
+TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or negative conn_gap "
+          "yields an empty mesh",
+          "[fin]")
+{
+    // Defensive generator-side guard: the GUI already clamps these to sane minimums
+    // (GLGizmoFin.cpp's MinFinDimension/MinFinParamValue), but .3mf/API callers can feed a
+    // FinFeature with arbitrary values -- e.g. a hand-edited or corrupted project file. Negative
+    // length/height in particular would otherwise flip the 2D rect's winding without crashing
+    // Clipper, producing wrong-but-non-empty geometry rather than the "no fin" contract this
+    // guard now enforces (T00-01-03 review note, docs/designs/00-vertical-fin/progress.md).
+    indexed_triangle_set cube = its_make_cube(20, 20, 20);
+    its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
+
+    FinFeature base;
+    base.anchor_xy = Vec2d(0.0, 0.0);
+    base.z_angle   = 0.0;
+    base.height    = 15.0;
+    base.length    = 16.0;
+    // thickness/conn_step/conn_gap stay at FinFeature{}'s own (positive) defaults.
+
+    SECTION("length == 0") {
+        FinFeature f = base; f.length = 0.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("length < 0") {
+        FinFeature f = base; f.length = -5.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("height == 0") {
+        FinFeature f = base; f.height = 0.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("height < 0") {
+        FinFeature f = base; f.height = -10.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("thickness == 0") {
+        FinFeature f = base; f.thickness = 0.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("thickness < 0") {
+        FinFeature f = base; f.thickness = -1.2;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("conn_gap < 0") {
+        FinFeature f = base; f.conn_gap = -1.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("conn_step == 0") {
+        FinFeature f = base; f.conn_step = 0.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
+    }
+    SECTION("conn_step < 0") {
+        FinFeature f = base; f.conn_step = -4.0;
+        CHECK(generate_one_fin(cube, f, 0.2, 0.45).empty());
     }
 }
 

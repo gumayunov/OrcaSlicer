@@ -44,11 +44,15 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
     return out;
 }
 
-int fin_connector_rows(const FinFeature& f)
+int fin_connector_rows(const FinFeature& f, double layer_height)
 {
+    // Clamp the row spacing to at least one layer (phase 05 edge case -- see the doc comment in
+    // FinGenerator.hpp): must match generate_one_fin()'s own effective_step exactly, or the row
+    // count computed here and the row heights it actually emits tabs at would disagree.
+    double effective_step = std::max(f.conn_step, layer_height);
     // +1e-9: fp rounding guard -- e.g. 15.0/0.3 == 49.9999... must not drop a row
     // (conn_step comes from GUI input in Phase 04, so "nice" ratios are common).
-    return int(std::floor(f.height / f.conn_step + 1e-9)) + 1;
+    return int(std::floor(f.height / effective_step + 1e-9)) + 1;
 }
 
 std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed)
@@ -293,6 +297,17 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
 {
     using namespace FinGeneratorInternal;
 
+    // Defensive hard guard (T00-01-03 review note + phase 05 plan): the GUI already clamps these
+    // to sane minimums (GLGizmoFin.cpp's MinFinDimension/MinFinParamValue), but .3mf/API callers
+    // can feed a FinFeature with arbitrary values -- e.g. a hand-edited or corrupted project file.
+    // A non-positive length/height would otherwise flip the 2D rect's winding without crashing
+    // Clipper, producing wrong-but-non-empty geometry instead of the "no fin" the caller should
+    // get; conn_step <= 0 would divide by zero / infinite-loop fin_connector_rows(); thickness <=
+    // 0 or conn_gap < 0 make no physical sense either. Bail out before slicing the solid at all.
+    if (fin_bed_frame.length <= 0.0 || fin_bed_frame.height <= 0.0 || fin_bed_frame.thickness <= 0.0 ||
+        fin_bed_frame.conn_gap < 0.0 || fin_bed_frame.conn_step <= 0.0)
+        return TriangleMesh();
+
     // Slice the solid in the fin's plane frame, where the fin plane is Z' = 0
     // (local z = n, the plane normal), to get the cross-section contour in the
     // (u, w) plane. params.trafo applies the frame change during slicing itself
@@ -356,16 +371,20 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     add_prism(fin_local, fin2d, -fin_bed_frame.thickness / 2., fin_bed_frame.thickness / 2.);
 
     // Connector tabs (design doc §15, revoking the earlier "always conn_gap wide" rule): small
-    // boxes bridging the fin's inner edge to the part's surface, one row every conn_step mm along
-    // w, starting at the bed (w=0) up to and including height. A row gets a tab only if (a) the
-    // section has material at that height (contour_u_at() returns a value) and (b) the part's
-    // surface is within conn_gap + kTabReachSlack of the fin's own inner edge -- the only way it
-    // isn't is the surface lying beyond the window's near edge ("part further out than the gizmo
-    // allows"), which the user confirmed should get no tab. kTabReachSlack tolerates the two
-    // independent computations (this closed-form d(w) vs. the fin2d polygon boolean ops) landing
-    // a hair apart. A row can also have no fin material at all (e.g. the window is fully consumed
-    // at that height) -- checked directly against fin2d rather than re-derived, since deriving it
-    // from d(w) alone would miss multi-component sections (see contour_u_at()'s own caveat).
+    // boxes bridging the fin's inner edge to the part's surface, one row every effective_step mm
+    // along w (effective_step = max(conn_step, layer_height), see fin_connector_rows()'s doc
+    // comment -- a conn_step smaller than one layer would otherwise request duplicate,
+    // vertically-overlapping tab rows), starting at the bed (w=0) up to and including height. A
+    // row gets a tab only if (a) the section has material at that height (contour_u_at() returns
+    // a value) and (b) the part's surface is within conn_gap + kTabReachSlack of the fin's own
+    // inner edge -- the only way it isn't is the surface lying beyond the window's near edge
+    // ("part further out than the gizmo allows"), which the user confirmed should get no tab.
+    // kTabReachSlack tolerates the two independent computations (this closed-form d(w) vs. the
+    // fin2d polygon boolean ops) landing a hair apart. A row can also have no fin material at all
+    // (e.g. the window is fully consumed at that height) -- checked directly against fin2d rather
+    // than re-derived, since deriving it from d(w) alone would miss multi-component sections (see
+    // contour_u_at()'s own caveat -- also the reason tabs measure against the OUTERMOST lobe of a
+    // multi-lobe section, not necessarily the nearest one; see the "two disjoint pillars" test).
     //
     // Penetration depths (2026-07-03 user report, progress.md): each side of the tab must reach
     // past its own "surface" by more than the old flat kTabOverlap=0.1mm, for two independent
@@ -384,9 +403,12 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     //    to conn_gap) never has its tab reach past material that was never generated.
     constexpr double kTabOverlap    = 0.1; // mm past the model surface / fin inner edge, floor value (each side)
     constexpr double kTabReachSlack = 0.2; // mm tolerance for the d(w) <= gap reach check
-    int n_rows = fin_connector_rows(fin_bed_frame);
+    // effective_conn_step (phase 05 edge case): a conn_step smaller than one layer would request
+    // duplicate/vertically-overlapping tab rows -- must match fin_connector_rows()'s own clamp.
+    double effective_conn_step = std::max(fin_bed_frame.conn_step, layer_height);
+    int    n_rows              = fin_connector_rows(fin_bed_frame, layer_height);
     for (int k = 0; k < n_rows; ++k) {
-        double                 w         = k * fin_bed_frame.conn_step;
+        double                 w         = k * effective_conn_step;
         coord_t                w_scaled  = scaled(w);
         std::optional<double>  u_surface = contour_u_at(section, w_scaled, /*max_side=*/true);
         if (!u_surface)

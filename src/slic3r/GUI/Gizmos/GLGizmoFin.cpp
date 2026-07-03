@@ -889,6 +889,15 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     if (field_committed)
         apply_to_model(_u8L("Edit fin"));
 
+    // T00-05-01: mirrors the red-plane tint (render_plane(), T00-04-04) with a textual warning --
+    // covers both empty-result causes generate_one_fin() can hit (plane misses the object
+    // entirely, or the window is fully swallowed by the part+gap): one generic message is enough
+    // to point the user at the red plane, matching how GLGizmoCut3D flags its own invalid states.
+    if (!m_ghost_valid) {
+        ImGui::Separator();
+        m_imgui->warning_text(_u8L("Fin does not intersect the object").c_str());
+    }
+
     ImGui::PopStyleVar(1); // ImGuiStyleVar_FramePadding
 
     GizmoImguiEnd();
