@@ -19,6 +19,7 @@
 #include "SceneRaycaster.hpp"
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
+#include "slic3r/GUI/FinGhosts.hpp"
 #include "libslic3r/Slicing.hpp"
 
 #include <float.h>
@@ -682,6 +683,7 @@ public:
 
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
+    FinGhostsRenderer m_fin_ghosts; // design 01: always-visible fin ghosts (Prepare view)
 
     struct ToolbarHighlighter
     {
@@ -1263,6 +1265,7 @@ private:
     void _render_plane() const;
     void _render_selection();
     void _render_sequential_clearance();
+    void _render_fin_ghosts();
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center() { m_selection.render_center(m_gizmos.is_dragging()); }
 #endif // ENABLE_RENDER_SELECTION_CENTER

@@ -2091,6 +2091,7 @@ void GLCanvas3D::render(bool only_init)
         _render_wireframe_overlay();
     }
 
+    _render_fin_ghosts();
     _render_sequential_clearance();
 #if ENABLE_RENDER_SELECTION_CENTER
     _render_selection_center();
@@ -8329,6 +8330,23 @@ void GLCanvas3D::_render_sequential_clearance()
         || can_sequential_clearance_show_in_gizmo()) {
         m_sequential_print_clearance.render();
     }
+}
+
+void GLCanvas3D::_render_fin_ghosts()
+{
+    // Prepare view only: the preview shows the fin as real toolpaths, the assemble
+    // view has no bed frame to anchor a fin to (design 01 §5).
+    if (m_canvas_type != ECanvasType::CanvasView3D || m_model == nullptr)
+        return;
+    // While the Fin gizmo is open it draws its own live ghost, possibly with unsaved
+    // edits -- scene ghosts of its object would show a stale twin next to it.
+    ObjectID skip_object;
+    if (m_gizmos.get_current_type() == GLGizmosManager::EType::Fin) {
+        const int object_idx = m_selection.get_object_idx();
+        if (object_idx >= 0 && object_idx < int(m_model->objects.size()))
+            skip_object = m_model->objects[object_idx]->id();
+    }
+    m_fin_ghosts.render(*m_model, skip_object);
 }
 
 void GLCanvas3D::_check_and_update_toolbar_icon_scale()
