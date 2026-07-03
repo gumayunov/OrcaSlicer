@@ -69,9 +69,15 @@ void GLGizmoFin::init_from_selection()
     // Recomputed on every activation for now -- nothing persists yet. T00-04-05
     // will read the object's stored FinFeature first and only fall back to these
     // defaults for a new fin.
+    // Anchor at the instance's own +Y silhouette edge, not the bbox center (design doc §15): with
+    // window semantics the gizmo rectangle is the literal bound of where fin material may exist,
+    // so a center anchor would put the whole window inside the part for anything wider than 2*L,
+    // yielding an empty (red) fin by default. At z_angle=0 (u == +Y, see plane_matrix()) this
+    // puts the window's near edge (u=0) right at the part's surface, so the default fin hugs it
+    // immediately instead of starting from the middle of the model.
     const BoundingBoxf3& bbox = m_parent.get_selection().get_bounding_box();
     const Vec3d center = bbox.center();
-    m_plane_center = Vec3d(center.x(), center.y(), 0.0);
+    m_plane_center = Vec3d(center.x(), bbox.max.y(), 0.0);
     m_z_angle      = 0.0;
 
     // Default H: the selected instance's world top above the bed (bbox is in world
