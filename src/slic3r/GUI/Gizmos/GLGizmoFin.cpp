@@ -131,8 +131,9 @@ void GLGizmoFin::data_changed(bool is_serializing)
     m_apply_on_close = mo != nullptr && !mo->fins.empty();
 }
 
-// T00-04-05: loads the selected object's existing fin -- the pending fin (ghost click /
-// undo-redo re-selection) or fins[0] -- when there is one, converting object-local -> world
+// T00-04-05: loads the selected object's existing fin -- the pending fin (today produced by
+// data_changed()'s undo/redo re-selection; ghost clicks start feeding it with design 03
+// phase 03) or fins[0] -- when there is one, converting object-local -> world
 // via fin_object_to_bed() (the exact inverse of apply_to_model()'s world -> object-local
 // conversion; see FinGenerator.hpp). Falls back to reset_to_defaults() for a fin-less object,
 // or if the instance transform degenerates the stored fin's axes (fin_object_to_bed() returns
@@ -151,8 +152,8 @@ void GLGizmoFin::init_from_selection()
 
     if (!load_fin_into_panel(fin_idx)) {
         if (mo != nullptr && !mo->fins.empty())
-            BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: stored fin's object-local axes are degenerate "
-                                           "under the current instance transform -- falling back to defaults";
+            BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: could not load stored fin into the panel (no valid "
+                                           "selection or degenerate instance transform) -- falling back to defaults";
         m_fin_idx = 0;
         reset_to_defaults();
     }
@@ -569,9 +570,9 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
-// Switch the edited fin within the current object (arrow buttons; ghost clicks land here
-// too via handle_ghost_click()). WYSIWYG: the panel state is committed first, so the fin
-// the user navigates away from keeps exactly what its ghost showed.
+// Switch the edited fin within the current object (arrow buttons; phase 03 of design 03
+// will route ghost clicks here as well). WYSIWYG: the panel state is committed first, so
+// the fin the user navigates away from keeps exactly what its ghost showed.
 void GLGizmoFin::select_fin(int fin_idx)
 {
     const ModelObject* mo = selected_model_object();

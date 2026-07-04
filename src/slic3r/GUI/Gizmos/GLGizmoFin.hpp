@@ -35,9 +35,9 @@ namespace GUI {
 //   n = horizontal plane normal
 // At z_angle == 0: u == +Y world, n == +X world.
 //
-// This gizmo only owns transient UI state; a later task (T00-04-05) reads/writes it
+// This gizmo owns transient UI state that the persistence path (T00-04-05) reads/writes
 // from/to a FinFeature on the object. The ImGui panel (T00-04-03) and ghost mesh
-// preview (T00-04-04) are both already wired up here.
+// preview (T00-04-04) are both wired up here as well.
 class GLGizmoFin : public GLGizmoBase
 {
     enum GrabberID {
@@ -55,7 +55,7 @@ class GLGizmoFin : public GLGizmoBase
     double m_length{ 8.0 };                 // L: plane extent along u, outward
 
     // Fin generation parameters, fed into generate_one_fin() for the ghost preview below
-    // (T00-04-04); T00-04-05 will persist them to ModelObject::fins. Defaults mirror
+    // (T00-04-04) and persisted to ModelObject::fins (T00-04-05). Defaults mirror
     // FinFeature's; reset alongside the plane state in init_from_selection().
     double m_thickness{ 1.2 };  // t: fin wall thickness
     double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
@@ -66,9 +66,11 @@ class GLGizmoFin : public GLGizmoBase
     // commits the panel first (WYSIWYG), so unselected fins always show committed state.
     int m_fin_idx{ 0 };
 
-    // Ghost-click across objects/instances (design 03): the fin to select once the
-    // Selection switch lands. Consumed and cleared by init_from_selection(); ignored
-    // there when the selected object no longer matches.
+    // The fin to select once the Selection switch lands. Today set only by data_changed()'s
+    // undo/redo re-selection (keeping the edited fin index across a restore); design 03
+    // phase 03 adds ghost-click cross-object/instance switching as a second producer.
+    // Consumed and cleared by init_from_selection(); ignored there when the selected
+    // object no longer matches.
     struct PendingFinSelection { ObjectID object; int fin_idx{ -1 }; };
     std::optional<PendingFinSelection> m_pending_selection;
 
