@@ -1440,6 +1440,37 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
     }
 }
 
+TEST_CASE("fin: generate_fin_meshes builds a mesh for every fin", "[fin]")
+{
+    // Regression lock for design 03 (multi-fin gizmo): the generator has been multi-fin from the
+    // start -- one mesh per stored fin, none shadowing or dropping its siblings. Locked here
+    // before the gizmo learns to create more than one fin.
+    Model        model;
+    ModelObject* o = model.add_object();
+    TriangleMesh cube = make_cube(20.0, 20.0, 20.0);
+    cube.translate(-10.f, -10.f, 0.f); // x,y in [-10,10], z in [0,20], base on bed
+    o->add_volume(std::move(cube), /*modify_to_center_geometry=*/false);
+
+    // Two fins on opposite sides of the cube, both anchored at its XY center: dir = +Y
+    // (z_angle 0) and dir = -Y (z_angle PI). conversion_test_fin()'s length (16) clears the
+    // section's far-side surface (u=10) + conn_gap (1) on EITHER side -- center-anchoring is
+    // symmetric, the same flip geometry the "2D region is a truncated rectangle" test pins --
+    // so both windows stay open and both fins must produce geometry.
+    FinFeature f1 = conversion_test_fin();
+    FinFeature f2 = f1;
+    f2.dir        = FinGeneratorInternal::dir_from_z_angle(PI);
+    o->fins.push_back(f1);
+    o->fins.push_back(f2);
+
+    std::vector<TriangleMesh> meshes =
+        generate_fin_meshes(*o, Transform3d::Identity(), /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE(meshes.size() == 2);
+
+    // One mesh per fin, each on its own side of the cube -- not two copies of the same fin.
+    CHECK(meshes[0].bounding_box().max.y() > 10.0);  // f1's wall beyond the cube's +Y face
+    CHECK(meshes[1].bounding_box().min.y() < -10.0); // f2's wall beyond the cube's -Y face
+}
+
 // --- FinGenerator: visual checkpoint (T00-01-06) ----------------------------
 //
 // Not a real regression test: dumps binary STLs of the input cube and the

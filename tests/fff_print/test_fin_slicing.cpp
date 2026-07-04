@@ -84,18 +84,18 @@ struct SliceMetrics
 };
 
 // Builds a single-object Print around tall_thin_box(), slices it, and reports SliceMetrics.
-// If `fin` is non-null, it is pushed onto the ModelObject's fins BEFORE Print::apply(), i.e.
-// exactly as if a GUI-driven fin were already present on the model when slicing starts.
+// Every FinFeature in `fins` is pushed onto the ModelObject's fins BEFORE Print::apply(), i.e.
+// exactly as if GUI-driven fins were already present on the model when slicing starts.
 //
 // Print/Model are built by hand here (not via Slic3r::Test::init_print) so that the
-// FinFeature can be attached to the ModelObject before the single Print::apply() call --
+// FinFeatures can be attached to the ModelObject before the single Print::apply() call --
 // init_print()'s Model-reference overload already calls apply() internally, which would
 // require a second apply() to pick up a fin added afterwards, an untested code path this
 // phase doesn't need. The instance is placed well inside the default 200x200 bed
 // (config `printable_area`); this offset cannot affect what gets sliced -- only where these
 // tests place the object on the bed -- because trafo_centered() (see tall_thin_box() above)
 // excludes the instance's on-bed translation entirely.
-SliceMetrics slice_metrics(const FinFeature *fin)
+SliceMetrics slice_metrics(const std::vector<FinFeature> &fins)
 {
     Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -115,8 +115,8 @@ SliceMetrics slice_metrics(const FinFeature *fin)
     instance->set_offset(Vec3d(100.0, 100.0, 0.0)); // well inside the 200x200 default bed
     object->ensure_on_bed();
 
-    if (fin != nullptr)
-        object->fins.push_back(*fin);
+    for (const FinFeature &f : fins)
+        object->fins.push_back(f);
 
     print.auto_assign_extruders(object);
     print.apply(model, config);
@@ -139,6 +139,16 @@ SliceMetrics slice_metrics(const FinFeature *fin)
     return m;
 }
 
+// Old single-fin entry point, kept for the pre-design-03 tests below: null means "no fin at
+// all" (the baseline), non-null a single fin.
+SliceMetrics slice_metrics(const FinFeature *fin)
+{
+    std::vector<FinFeature> fins;
+    if (fin != nullptr)
+        fins.push_back(*fin);
+    return slice_metrics(fins);
+}
+
 } // namespace
 
 TEST_CASE("fin: fin adds geometry to the sliced object", "[fin]")
@@ -152,6 +162,26 @@ TEST_CASE("fin: fin adds geometry to the sliced object", "[fin]")
     CHECK(with_fin.layer_count == baseline.layer_count);
     // No injection exists yet (T00-02-02) -- this is expected to FAIL until that lands.
     CHECK(with_fin.area > baseline.area);
+}
+
+TEST_CASE("fin: every fin contributes geometry to the sliced object", "[fin]")
+{
+    // Regression lock for design 03 (multi-fin gizmo): slice-time injection is already
+    // multi-fin -- a second fin must ADD its own cross-section, not replace or shadow the
+    // first. The second fin mirrors crossing_fin() to the box's -Y side (dir flipped by PI):
+    // center-anchoring is symmetric, so the same length keeps its window open there too, and
+    // the two fins occupy disjoint regions -- their combined area is strictly larger.
+    FinFeature first  = crossing_fin();
+    FinFeature second = crossing_fin();
+    second.dir = FinGeneratorInternal::dir_from_z_angle(PI); // opposite side of the box
+
+    SliceMetrics with_one = slice_metrics({first});
+    SliceMetrics with_two = slice_metrics({first, second});
+
+    // Both fins share crossing_fin()'s height (20, inside the box's own 40mm Z range), so the
+    // second fin cannot add layers -- only area within layers that already exist.
+    CHECK(with_two.layer_count == with_one.layer_count);
+    CHECK(with_two.area > with_one.area); // the second fin must add its own cross-section
 }
 
 TEST_CASE("fin: no-intersection slice is identical to no fin", "[fin]")
