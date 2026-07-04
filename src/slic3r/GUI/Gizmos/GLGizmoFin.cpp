@@ -72,8 +72,19 @@ void GLGizmoFin::on_set_state()
         // only commit while the selection still points at the object/instance this panel
         // state belongs to; every completed gesture was already persisted individually via
         // apply_to_model(), so skipping here loses nothing.
+        //
+        // Never commit while GLGizmosManager is deserializing an undo/redo snapshot
+        // (is_serializing()): load_snapshot() restores the Model first and only then closes
+        // this gizmo via activate_gizmo() (when the target snapshot had no gizmo open), so at
+        // that instant the m_* state still holds the just-undone values while ModelObject::fins
+        // already holds the restored ones -- committing here would re-write the undone values
+        // and take a rogue "Edit fin" snapshot INSIDE the undo load, making Ctrl+Z of a fin
+        // edit appear to do nothing. data_changed(is_serializing=true) is the sanctioned
+        // reload path instead; this mirrors how activate_gizmo() guards its own enter/leave
+        // snapshots with !m_serializing.
         const Selection& selection = m_parent.get_selection();
         if (m_apply_on_close
+            && !m_parent.get_gizmos_manager().is_serializing()
             && selection.get_object_idx() == m_solid_object_idx
             && selection.get_instance_idx() == m_solid_instance_idx)
             apply_to_model(_u8L("Edit fin"));
@@ -104,6 +115,12 @@ void GLGizmoFin::data_changed(bool is_serializing)
     m_drag_ref_captured = false; // no in-flight gesture reference survives an undo/redo jump
     init_from_selection();
     rebuild_object_solid();
+    // After an undo/redo the restored model is the source of truth: if it says "no fin"
+    // (e.g. a redone Remove fin), closing the gizmo must not resurrect one. The WYSIWYG
+    // close-commit stays armed only when a fin actually survived the restore; any explicit
+    // edit gesture afterwards re-arms it via apply_to_model().
+    const ModelObject* mo = selected_model_object();
+    m_apply_on_close = mo != nullptr && !mo->fins.empty();
 }
 
 // T00-04-05: loads the selected object's existing fin (fins[0] -- single-fin UX for now) when
@@ -369,7 +386,10 @@ static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
     return a.enabled == b.enabled
         && std::abs(a.anchor_xy.x() - b.anchor_xy.x()) < eps
         && std::abs(a.anchor_xy.y() - b.anchor_xy.y()) < eps
-        && std::abs(a.z_angle   - b.z_angle)   < eps
+        // z_angle compares modulo 2*PI: both conversions derive it via atan2 (range (-PI, PI]),
+        // so a heading of ~ +/-PI can round-trip to the opposite sign -- a naive |a - b| would
+        // then be ~2*PI at the branch cut and flag a phantom diff on every close.
+        && std::abs(std::remainder(a.z_angle - b.z_angle, 2.0 * PI)) < eps
         && std::abs(a.height    - b.height)    < eps
         && std::abs(a.length    - b.length)    < eps
         && std::abs(a.thickness - b.thickness) < eps
@@ -419,8 +439,10 @@ std::optional<Transform3d> GLGizmoFin::selected_instance_matrix() const
 // or when the instance transform degenerates the fin's local axes (fin_bed_to_object() returns
 // nullopt -- see its doc comment); the latter is logged since it silently drops the edit. Also a
 // no-op when the converted fin is approximately equal to what is already stored (fins_approx_equal()
-// above) -- this is what makes the WYSIWYG close-commit in on_set_state() harmless to call on every
-// gizmo close, even when nothing actually changed.
+// above) -- this keeps a no-change WYSIWYG close-commit from polluting the undo stack. Note the
+// approx-equal skip alone does NOT make the close-commit safe in every context: during undo/redo
+// deserialization the m_* state genuinely differs from the freshly restored model, so
+// on_set_state() additionally guards the call with !is_serializing() (see its comment).
 //
 // Full persistence contract for the Fin gizmo (T01-00-06): every completed user gesture (drag-end,
 // an ImGui field's IsItemDeactivatedAfterEdit(), the Enabled checkbox, Flip) calls this function

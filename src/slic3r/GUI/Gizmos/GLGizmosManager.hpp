@@ -232,6 +232,10 @@ public:
     bool is_enabled() const { return m_enabled; }
     void set_enabled(bool enable) { m_enabled = enable; }
 
+    // True while load() is deserializing an undo/redo snapshot (gizmos may be closed/opened
+    // mid-restore); gizmos must not commit state or take snapshots of their own during this.
+    bool is_serializing() const { return m_serializing; }
+
     void set_icon_dirty() { m_icons_texture_dirty = true; }
     void set_overlay_icon_size(float size);
     void set_overlay_scale(float scale);
