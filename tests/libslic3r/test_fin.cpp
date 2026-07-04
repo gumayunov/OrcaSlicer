@@ -1440,7 +1440,9 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
     }
 }
 
-TEST_CASE("fin: generate_fin_meshes builds a mesh for every fin", "[fin]")
+// --- FinGenerator: one mesh per fin (design 03 regression lock) ---
+
+TEST_CASE("generate_fin_meshes: builds a mesh for every fin", "[fin]")
 {
     // Regression lock for design 03 (multi-fin gizmo): the generator has been multi-fin from the
     // start -- one mesh per stored fin, none shadowing or dropping its siblings. Locked here

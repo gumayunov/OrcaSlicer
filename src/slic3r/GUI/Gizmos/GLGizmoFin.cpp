@@ -4,6 +4,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "slic3r/GUI/format.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 #include "slic3r/GUI/FinGhosts.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -93,7 +94,7 @@ void GLGizmoFin::on_set_state()
 
 // Called by GLGizmosManager::update_data() -- notably from update_after_undo_redo() with
 // is_serializing == true, right after an undo/redo rolled the Model (incl. ModelObject::fins)
-// back under this open gizmo. The gizmo's plane/params are a cached VIEW of fins[0]: without
+// back under this open gizmo. The gizmo's plane/params are a cached VIEW of fins[m_fin_idx]: without
 // this reload the panel and ghost would keep showing the pre-undo state (undo looks like a
 // no-op), and worse, the next commit gesture would write that stale state back -- silently
 // re-doing what the user just undid. The model is the source of truth, so nothing is
@@ -113,6 +114,13 @@ void GLGizmoFin::data_changed(bool is_serializing)
         return;
     BOOST_LOG_TRIVIAL(info) << "GLGizmoFin: undo/redo restore detected -- reloading gizmo state from ModelObject::fins";
     m_drag_ref_captured = false; // no in-flight gesture reference survives an undo/redo jump
+    // Keep the user's fin selection across undo/redo when possible: re-select the same
+    // index clamped to the restored vector (via the pending mechanism init_from_selection()
+    // already consumes). An emptied vector falls through to defaults as before.
+    if (const ModelObject* mo_before = selected_model_object();
+        mo_before != nullptr && !mo_before->fins.empty())
+        m_pending_selection = PendingFinSelection{ mo_before->id(),
+                                                   std::min(m_fin_idx, int(mo_before->fins.size()) - 1) };
     init_from_selection();
     rebuild_object_solid();
     // After an undo/redo the restored model is the source of truth: if it says "no fin"
@@ -123,35 +131,61 @@ void GLGizmoFin::data_changed(bool is_serializing)
     m_apply_on_close = mo != nullptr && !mo->fins.empty();
 }
 
-// T00-04-05: loads the selected object's existing fin (fins[0] -- single-fin UX for now) when
-// there is one, converting object-local -> world via fin_object_to_bed() (the exact inverse of
-// apply_to_model()'s world -> object-local conversion; see FinGenerator.hpp). Falls back to
-// reset_to_defaults() for a fin-less object, or if the instance transform degenerates the
-// stored fin's axes (fin_object_to_bed() returns nullopt -- e.g. the object was rotated
-// elsewhere into an orientation where the fin's plane axis is no longer horizontal).
+// T00-04-05: loads the selected object's existing fin -- the pending fin (ghost click /
+// undo-redo re-selection) or fins[0] -- when there is one, converting object-local -> world
+// via fin_object_to_bed() (the exact inverse of apply_to_model()'s world -> object-local
+// conversion; see FinGenerator.hpp). Falls back to reset_to_defaults() for a fin-less object,
+// or if the instance transform degenerates the stored fin's axes (fin_object_to_bed() returns
+// nullopt -- e.g. the object was rotated elsewhere into an orientation where the fin's plane
+// axis is no longer horizontal).
 void GLGizmoFin::init_from_selection()
 {
-    m_apply_on_close = true; // fresh per activation/object -- re-arm the WYSIWYG close-commit (T01-00-06)
+    m_apply_on_close = true; // fresh per activation/object -- re-arm the WYSIWYG close-commit
     const ModelObject* mo = selected_model_object();
-    if (mo != nullptr && !mo->fins.empty()) {
-        if (const std::optional<Transform3d> to_bed = selected_instance_matrix(); to_bed.has_value()) {
-            if (const std::optional<FinFeature> fin_world = FinGeneratorInternal::fin_object_to_bed(mo->fins.front(), *to_bed);
-                fin_world.has_value()) {
-                m_plane_center = Vec3d(fin_world->anchor.x(), fin_world->anchor.y(), 0.0);
-                m_z_angle      = FinGeneratorInternal::z_angle_from_dir(fin_world->dir);
-                m_height       = fin_world->height;
-                m_length       = fin_world->length;
-                m_thickness    = fin_world->thickness;
-                m_conn_step    = fin_world->conn_step;
-                m_conn_gap     = fin_world->conn_gap;
-                m_ghost_dirty  = true; // T00-04-04: the plane/params above just changed
-                return;
-            }
+
+    int fin_idx = 0;
+    if (mo != nullptr && m_pending_selection.has_value() && m_pending_selection->object == mo->id()
+        && !mo->fins.empty())
+        fin_idx = std::clamp(m_pending_selection->fin_idx, 0, int(mo->fins.size()) - 1);
+    m_pending_selection.reset();
+
+    if (!load_fin_into_panel(fin_idx)) {
+        if (mo != nullptr && !mo->fins.empty())
             BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: stored fin's object-local axes are degenerate "
                                            "under the current instance transform -- falling back to defaults";
-        }
+        m_fin_idx = 0;
+        reset_to_defaults();
     }
-    reset_to_defaults();
+}
+
+// fins[fin_idx] -> panel state (object-local -> bed via fin_object_to_bed(), the exact
+// inverse of the persistence path). On success also makes fin_idx the selected fin.
+// Returns false -- leaving the panel AND m_fin_idx untouched -- when the index is out of
+// range, there is no valid selection, or the instance transform degenerates the stored
+// fin's axes.
+bool GLGizmoFin::load_fin_into_panel(int fin_idx)
+{
+    const ModelObject* mo = selected_model_object();
+    if (mo == nullptr || fin_idx < 0 || size_t(fin_idx) >= mo->fins.size())
+        return false;
+    const std::optional<Transform3d> to_bed = selected_instance_matrix();
+    if (!to_bed.has_value())
+        return false;
+    const std::optional<FinFeature> fin_world =
+        FinGeneratorInternal::fin_object_to_bed(mo->fins[fin_idx], *to_bed);
+    if (!fin_world.has_value())
+        return false;
+
+    m_fin_idx      = fin_idx;
+    m_plane_center = Vec3d(fin_world->anchor.x(), fin_world->anchor.y(), 0.0);
+    m_z_angle      = FinGeneratorInternal::z_angle_from_dir(fin_world->dir);
+    m_height       = fin_world->height;
+    m_length       = fin_world->length;
+    m_thickness    = fin_world->thickness;
+    m_conn_step    = fin_world->conn_step;
+    m_conn_gap     = fin_world->conn_gap;
+    m_ghost_dirty  = true;
+    return true;
 }
 
 // Factory-default plane/params for a new fin -- also the Reset button's target (unlike
@@ -357,14 +391,7 @@ void GLGizmoFin::update_ghost_preview()
     // Verbatim gizmo state -> bed-frame FinFeature (the plane already IS in the bed frame, so,
     // unlike generate_fin_meshes()'s object-local -> bed conversion, no further transform is
     // needed here).
-    FinFeature fin_bed_frame;
-    fin_bed_frame.anchor = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
-    fin_bed_frame.dir    = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
-    fin_bed_frame.height    = m_height;
-    fin_bed_frame.length    = m_length;
-    fin_bed_frame.thickness = m_thickness;
-    fin_bed_frame.conn_step = m_conn_step;
-    fin_bed_frame.conn_gap  = m_conn_gap;
+    const FinFeature fin_bed_frame = panel_fin_world();
 
     m_ghost_valid = FinGhost::build_ghost(m_ghost_model, m_object_solid_bed, fin_bed_frame);
 }
@@ -372,7 +399,7 @@ void GLGizmoFin::update_ghost_preview()
 // --- Persistence (T00-04-05) -------------------------------------------------
 
 // Approximate FinFeature equality for the "did the user actually change anything" check in
-// apply_to_model(). Both operands are BED-FRAME canonical forms (anchor.z == 0, unit
+// prepare_commit(). Both operands are BED-FRAME canonical forms (anchor.z == 0, unit
 // horizontal dir): the stored fin's fin_object_to_bed() image vs. the gizmo's own bed-frame
 // state -- comparing raw object-local fields instead would be transform-dependent (see the
 // comment at the call site) and the round trip through the conversions is exact only up to
@@ -427,14 +454,87 @@ std::optional<Transform3d> GLGizmoFin::selected_instance_matrix() const
     return mo->instances[instance_idx]->get_matrix();
 }
 
-// Writes the current gizmo (world-frame) state into the selected object's fins[0] (creating it
-// if the object had none yet -- single-fin UX for now), converting world -> object-local via
-// fin_bed_to_object() (FinGenerator.hpp; the exact inverse of init_from_selection()'s
-// fin_object_to_bed() call). Wrapped in one undo/redo snapshot per call -- callers are
-// responsible for calling this only once per user gesture (a drag's on_stop_dragging(), or an
-// ImGui field's commit/IsItemDeactivatedAfterEdit(), not every intermediate frame) so a single
-// drag or edit does not spam the undo stack. Schedules a background reslice on success, mirroring
-// how e.g. GLGizmoFdmSupports/GLGizmoBrimEars commit paint/point edits onto their ModelObject.
+// The panel's current plane/params as a bed-frame FinFeature (the gizmo's world frame IS
+// the bed frame). Shared by the ghost preview and the persistence path so they can never
+// drift apart.
+FinFeature GLGizmoFin::panel_fin_world() const
+{
+    FinFeature f;
+    f.anchor    = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
+    f.height    = m_height;
+    f.length    = m_length;
+    f.thickness = m_thickness;
+    f.conn_step = m_conn_step;
+    f.conn_gap  = m_conn_gap;
+    return f;
+}
+
+// Converts the panel state for a commit into fins[m_fin_idx]: bed-frame image, its
+// object-local form, and whether storing it would actually change the model (the
+// no-change check runs on the BED-FRAME images -- see the comment inside; raw
+// object-local comparison would be transform-dependent). nullopt: no valid selection
+// or the conversion is degenerate (logged -- it silently drops the edit otherwise).
+std::optional<GLGizmoFin::PanelCommit> GLGizmoFin::prepare_commit() const
+{
+    const ModelObject* mo = selected_model_object();
+    if (mo == nullptr)
+        return std::nullopt;
+    const std::optional<Transform3d> to_bed = selected_instance_matrix();
+    if (!to_bed.has_value())
+        return std::nullopt;
+
+    PanelCommit commit;
+    commit.fin_world = panel_fin_world();
+    const std::optional<FinFeature> fin_object =
+        FinGeneratorInternal::fin_bed_to_object(commit.fin_world, *to_bed);
+    if (!fin_object.has_value()) {
+        BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: instance transform makes the world -> object-local "
+                                       "fin conversion degenerate -- not persisting this edit";
+        return std::nullopt;
+    }
+    commit.fin_object    = *fin_object;
+    commit.changes_model = true;
+
+    if (size_t(m_fin_idx) < mo->fins.size()) {
+        // No-change check on the BED-FRAME images, not the raw object-local fields: the stored
+        // anchor was normalized to bed z=0 under the instance transform AT STORE TIME, so after
+        // the user lifts/tilts the object a zero-edit open->close would produce object-local
+        // fields differing by the transform delta -- a raw-field compare would then flag a
+        // phantom edit and take a spurious snapshot + reslice for a geometrically identical
+        // fin. A nullopt projection (stored fin degenerate) counts as "different".
+        const std::optional<FinFeature> stored_bed =
+            FinGeneratorInternal::fin_object_to_bed(mo->fins[m_fin_idx], *to_bed);
+        if (stored_bed.has_value() && fins_approx_equal(*stored_bed, commit.fin_world))
+            commit.changes_model = false;
+    }
+    return commit;
+}
+
+// The write half: fins[m_fin_idx] = commit (creating the slot when m_fin_idx points one
+// past the end -- the "new fin" case of add_fin() and of an object with no fins yet).
+// NO undo snapshot here -- callers own snapshotting, so add_fin() can wrap two stores
+// into one "Add fin" snapshot.
+void GLGizmoFin::store_commit(ModelObject& mo, const PanelCommit& commit)
+{
+    if (size_t(m_fin_idx) >= mo.fins.size()) {
+        m_fin_idx = int(mo.fins.size());
+        mo.fins.push_back(FinFeature{});
+    }
+    mo.fins[m_fin_idx] = commit.fin_object;
+    m_apply_on_close   = true; // any explicit commit re-arms the WYSIWYG close-commit
+}
+
+// Writes the current gizmo (world-frame) state into the selected object's fins[m_fin_idx]
+// (creating the slot when m_fin_idx points one past the end -- an object with no fins yet),
+// converting world -> object-local via fin_bed_to_object() (FinGenerator.hpp; the exact inverse
+// of init_from_selection()'s fin_object_to_bed() call -- see prepare_commit()/store_commit()
+// above, which hold the snapshot-free halves of this path). Wrapped in one undo/redo snapshot
+// per call -- callers are responsible for calling this only once per user gesture (a drag's
+// on_stop_dragging(), or an ImGui field's commit/IsItemDeactivatedAfterEdit(), not every
+// intermediate frame) so a single drag or edit does not spam the undo stack. Schedules a
+// background reslice on success, mirroring how e.g. GLGizmoFdmSupports/GLGizmoBrimEars commit
+// paint/point edits onto their ModelObject.
 // No-op (nothing persisted, no snapshot taken) when there is no valid single-instance selection,
 // or when the instance transform degenerates the fin's local axes (fin_bed_to_object() returns
 // nullopt -- see its doc comment); the latter is logged since it silently drops the edit. Also a
@@ -457,59 +557,73 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     ModelObject* mo = selected_model_object();
     if (mo == nullptr)
         return;
-    const std::optional<Transform3d> to_bed = selected_instance_matrix();
-    if (!to_bed.has_value())
-        return;
-
-    FinFeature fin_world;
-    fin_world.anchor = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
-    fin_world.dir    = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
-    fin_world.height    = m_height;
-    fin_world.length    = m_length;
-    fin_world.thickness = m_thickness;
-    fin_world.conn_step = m_conn_step;
-    fin_world.conn_gap  = m_conn_gap;
-
-    const std::optional<FinFeature> fin_object = FinGeneratorInternal::fin_bed_to_object(fin_world, *to_bed);
-    if (!fin_object.has_value()) {
-        BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: instance transform makes the world -> object-local "
-                                       "fin conversion degenerate -- not persisting this edit";
-        return;
-    }
-
-    // No-change check on the BED-FRAME images, not the raw object-local fields: the stored
-    // anchor was normalized to bed z=0 under the instance transform AT STORE TIME, so after
-    // the user lifts/tilts the object a zero-edit open->close would produce object-local
-    // fields differing by the transform delta (re-anchoring makes the raw representation
-    // transform-dependent) -- a raw-field compare would then flag a phantom edit and take a
-    // spurious snapshot + reslice for a geometrically identical fin. Both bed-frame operands
-    // are canonical (anchor.z == 0, unit horizontal dir), so the eps compare is meaningful.
-    // A nullopt projection (stored fin degenerate under the current transform) counts as
-    // "different" and falls through to the write.
-    if (!mo->fins.empty()) {
-        const std::optional<FinFeature> stored_bed =
-            FinGeneratorInternal::fin_object_to_bed(mo->fins.front(), *to_bed);
-        if (stored_bed.has_value() && fins_approx_equal(*stored_bed, fin_world))
-            return; // nothing actually changed -- don't pollute the undo stack
-    }
+    const std::optional<PanelCommit> commit = prepare_commit();
+    if (!commit.has_value() || !commit->changes_model)
+        return; // nothing to persist -- don't pollute the undo stack
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
     BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";
-    if (mo->fins.empty())
-        mo->fins.push_back(FinFeature{});
-    mo->fins.front() = *fin_object;
-    m_apply_on_close = true; // any explicit commit re-arms the WYSIWYG close-commit
+    store_commit(*mo, *commit);
 
     wxGetApp().plater()->set_plater_dirty(true);
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
-// "Remove fin" button (T00-04-05): clears the object's fins outright -- the ONLY way to
-// delete a stored fin. No-op when the
-// object has no fin to remove (nothing to snapshot). Also suppresses the WYSIWYG close-commit
-// (m_apply_on_close, T01-00-06): the panel still holds the removed fin's parameters and the ghost
-// stays visible, so without this, closing the gizmo right after Remove would immediately
-// resurrect the fin the user just deleted.
+// Switch the edited fin within the current object (arrow buttons; ghost clicks land here
+// too via handle_ghost_click()). WYSIWYG: the panel state is committed first, so the fin
+// the user navigates away from keeps exactly what its ghost showed.
+void GLGizmoFin::select_fin(int fin_idx)
+{
+    const ModelObject* mo = selected_model_object();
+    if (mo == nullptr || fin_idx < 0 || size_t(fin_idx) >= mo->fins.size() || fin_idx == m_fin_idx)
+        return;
+    apply_to_model(_u8L("Edit fin"));
+    if (!load_fin_into_panel(fin_idx))
+        BOOST_LOG_TRIVIAL(warning) << "GLGizmoFin: fin " << fin_idx << " is degenerate under the "
+                                       "current instance transform -- selection unchanged";
+}
+
+int GLGizmoFin::stored_fin_count() const
+{
+    const ModelObject* mo = selected_model_object();
+    return mo == nullptr ? 0 : int(mo->fins.size());
+}
+
+// "+ Add fin": commit the current panel state (WYSIWYG), then create and select a new fin
+// with the factory-default plane. ONE undo snapshot for the whole gesture, so Ctrl+Z rolls
+// back both the pre-switch commit and the new fin in a single step.
+void GLGizmoFin::add_fin()
+{
+    ModelObject* mo = selected_model_object();
+    if (mo == nullptr || !selected_instance_matrix().has_value())
+        return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Add fin"), UndoRedo::SnapshotType::GizmoAction);
+    BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot 'Add fin'";
+
+    if (const std::optional<PanelCommit> current = prepare_commit();
+        current.has_value() && current->changes_model)
+        store_commit(*mo, *current);
+
+    reset_to_defaults();
+    m_fin_idx = int(mo->fins.size()); // store_commit() creates fins[m_fin_idx] from the defaults
+    if (const std::optional<PanelCommit> fresh = prepare_commit(); fresh.has_value())
+        store_commit(*mo, *fresh);
+    // A degenerate conversion (non-invertible instance matrix) leaves the vector as
+    // committed above; the panel still shows the default plane and the next successful
+    // gesture creates the fin. The snapshot is then near-empty -- accepted rare edge.
+
+    wxGetApp().plater()->set_plater_dirty(true);
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+}
+
+// "Remove fin" button (T00-04-05): erases ONLY the selected fin (fins[m_fin_idx], design 03) --
+// the ONLY way to delete a stored fin. No-op when the object has no fin to remove (nothing to
+// snapshot). When a fin survives, the nearest surviving neighbor is loaded into the panel
+// (WYSIWYG re-arm: closing then commits THAT fin). Only when the vector just got emptied is
+// the WYSIWYG close-commit suppressed (m_apply_on_close, T01-00-06): the panel still holds the
+// removed fin's parameters and the ghost stays visible, so without this, closing the gizmo
+// right after Remove would immediately resurrect the fin the user just deleted.
 void GLGizmoFin::remove_fin_from_model()
 {
     ModelObject* mo = selected_model_object();
@@ -517,9 +631,26 @@ void GLGizmoFin::remove_fin_from_model()
         return;
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove fin"), UndoRedo::SnapshotType::GizmoAction);
-    BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot 'Remove fin', clearing fins";
-    mo->fins.clear();
-    m_apply_on_close = false;
+    const int removed = std::min(m_fin_idx, int(mo->fins.size()) - 1);
+    BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot 'Remove fin', erasing fin " << removed;
+    mo->fins.erase(mo->fins.begin() + removed);
+
+    if (mo->fins.empty()) {
+        // Last fin gone: the panel keeps showing its parameters (pre-design-03 behavior)
+        // and the close-commit is suppressed so closing does not resurrect it.
+        m_fin_idx        = 0;
+        m_apply_on_close = false;
+    } else {
+        const int next = std::min(removed, int(mo->fins.size()) - 1);
+        if (!load_fin_into_panel(next)) {
+            // Degenerate under the current transform: don't let a close-commit stamp the
+            // REMOVED fin's parameters (still in the panel) onto a surviving fin.
+            m_fin_idx        = next;
+            m_apply_on_close = false;
+        }
+        // load_fin_into_panel() success re-selects `next`; closing then commits THAT fin,
+        // which is correct WYSIWYG behavior.
+    }
 
     wxGetApp().plater()->set_plater_dirty(true);
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -873,11 +1004,33 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
 
     ImGui::Separator();
 
+    // Multi-fin navigation (design 03): the arrows cycle the selected fin -- the fallback
+    // path for fins whose ghost is empty (plane misses the part) and therefore unclickable;
+    // "+ Add fin" commits the current fin and creates-and-selects a new default one. The
+    // count reflects the committed model; a fresh panel with no stored fin reads 1/1 with
+    // the arrows disabled.
+    const int fin_count = stored_fin_count();
+    const int nav_count = std::max(fin_count, 1);
+    m_imgui->disabled_begin(nav_count <= 1);
+    if (m_imgui->button("<##fin_prev"))
+        select_fin((m_fin_idx + nav_count - 1) % nav_count);
+    ImGui::SameLine();
+    if (m_imgui->button(">##fin_next"))
+        select_fin((m_fin_idx + 1) % nav_count);
+    m_imgui->disabled_end();
+    ImGui::SameLine();
+    m_imgui->text(GUI::format(_L("Fin %1%/%2%"), m_fin_idx + 1, nav_count));
+    ImGui::SameLine();
+    if (m_imgui->button(_L("+ Add fin")))
+        add_fin();
+
+    ImGui::Separator();
+
     if (m_imgui->button(_L("Reset")))
         reset_to_defaults(); // sets m_ghost_dirty itself; does NOT touch ModelObject::fins (see its doc comment)
 
-    // On its own row, separated from Reset: unlike it, this is destructive (clears
-    // ModelObject::fins outright, see remove_fin_from_model()'s doc comment).
+    // On its own row, separated from Reset: unlike it, this is destructive (erases the
+    // selected fin from ModelObject::fins, see remove_fin_from_model()'s doc comment).
     if (m_imgui->button(_L("Remove fin")))
         remove_fin_from_model();
 

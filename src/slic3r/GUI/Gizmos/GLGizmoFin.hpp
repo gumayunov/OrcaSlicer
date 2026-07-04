@@ -8,6 +8,11 @@
 // (the ghost-preview solid cache, T00-04-04), not just a reference/pointer.
 #include "libslic3r/TriangleMesh.hpp"
 
+// PendingFinSelection below holds an ObjectID by value; PanelCommit and panel_fin_world()
+// use FinFeature (Model.hpp) by value.
+#include "libslic3r/ObjectID.hpp"
+#include "libslic3r/Model.hpp"
+
 #include <optional>
 #include <string>
 
@@ -55,6 +60,17 @@ class GLGizmoFin : public GLGizmoBase
     double m_thickness{ 1.2 };  // t: fin wall thickness
     double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
     double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
+
+    // Multi-fin selection (design 03): index into ModelObject::fins of the fin this panel
+    // edits. Every former fins.front() call site targets fins[m_fin_idx]; switching fins
+    // commits the panel first (WYSIWYG), so unselected fins always show committed state.
+    int m_fin_idx{ 0 };
+
+    // Ghost-click across objects/instances (design 03): the fin to select once the
+    // Selection switch lands. Consumed and cleared by init_from_selection(); ignored
+    // there when the selected object no longer matches.
+    struct PendingFinSelection { ObjectID object; int fin_idx{ -1 }; };
+    std::optional<PendingFinSelection> m_pending_selection;
 
     // WYSIWYG close-commit (T01-00-06): suppresses the close-time apply_to_model() call
     // (on_set_state()'s Off branch) right after "Remove fin" -- without it, closing the gizmo
@@ -155,6 +171,18 @@ private:
     std::optional<Transform3d>  selected_instance_matrix() const;
     void                        apply_to_model(const std::string& snapshot_name);
     void                        remove_fin_from_model();
+
+    // Multi-fin plumbing (design 03).
+    FinFeature panel_fin_world() const;            // m_* plane/params -> bed-frame FinFeature
+    bool       load_fin_into_panel(int fin_idx);   // fins[fin_idx] -> panel; false = missing/degenerate
+    void       select_fin(int fin_idx);            // WYSIWYG-commit current, then load fins[fin_idx]
+    void       add_fin();                          // commit current, create + select a new default fin
+    int        stored_fin_count() const;
+
+    // Snapshot-free commit halves; apply_to_model()/add_fin() own the undo snapshots.
+    struct PanelCommit { FinFeature fin_world; FinFeature fin_object; bool changes_model; };
+    std::optional<PanelCommit> prepare_commit() const;
+    void                       store_commit(ModelObject& mo, const PanelCommit& commit);
 };
 
 } // namespace GUI
