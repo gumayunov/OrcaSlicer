@@ -95,8 +95,9 @@ public:
     // The fin the Fin gizmo currently edits (hidden + unpickable); default-constructed
     // ref = nothing selected. Pushed by GLCanvas3D::_render_fin_ghosts() every frame.
     void set_selected(const FinGhostRef& selected) { m_selected = selected; }
-    // The ghost under the mouse (rendered highlighted); pushed by GLGizmoFin on mouse
-    // moves (phase 03), cleared by GLCanvas3D whenever the Fin gizmo is not active.
+    // The ghost under the mouse (rendered highlighted); pushed by GLGizmoFin::
+    // update_ghost_hover() on mouse moves, cleared by GLCanvas3D whenever the Fin
+    // gizmo is not active.
     void set_hovered(const FinGhostRef& hovered) { m_hovered = hovered; }
 
     // Closest ghost under the mouse ray, or nullopt. Skips the selected fin (not drawn =>

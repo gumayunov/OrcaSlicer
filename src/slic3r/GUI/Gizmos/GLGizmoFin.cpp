@@ -131,9 +131,9 @@ void GLGizmoFin::data_changed(bool is_serializing)
     m_apply_on_close = mo != nullptr && !mo->fins.empty();
 }
 
-// T00-04-05: loads the selected object's existing fin -- the pending fin (today produced by
-// data_changed()'s undo/redo re-selection; ghost clicks start feeding it with design 03
-// phase 03) or fins[0] -- when there is one, converting object-local -> world
+// T00-04-05: loads the selected object's existing fin -- the pending fin (produced by
+// data_changed()'s undo/redo re-selection or by handle_ghost_click()'s cross-object
+// switch) or fins[0] -- when there is one, converting object-local -> world
 // via fin_object_to_bed() (the exact inverse of apply_to_model()'s world -> object-local
 // conversion; see FinGenerator.hpp). Falls back to reset_to_defaults() for a fin-less object,
 // or if the instance transform degenerates the stored fin's axes (fin_object_to_bed() returns
@@ -246,6 +246,19 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
     if (use_grabbers(mouse_event))
         return true;
 
+    // Ghost hover highlight (design 03): observe-only -- never consume moves.
+    if (mouse_event.Moving()) {
+        update_ghost_hover(mouse_event);
+        return false;
+    }
+
+    // Ghost-click fin selection (design 03): a clean left press (no grabber hovered, no
+    // camera drag in flight) on a scene ghost switches the edited fin -- possibly across
+    // objects/instances. Consumed so the canvas never treats it as select/deselect.
+    if (mouse_event.LeftDown() && !m_parent.is_mouse_dragging() && m_hover_id < 0
+        && handle_ghost_click(mouse_event))
+        return true;
+
     // Consume left-clicks that did not interact with any grabber (but not the
     // release of a camera drag): otherwise a stray click on empty space reaches
     // GLCanvas3D's deselect path, which deselects the object, closes this gizmo
@@ -257,6 +270,52 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
         return true;
 
     return false;
+}
+
+// Raycast the scene ghosts under the cursor and push the hover descriptor into the
+// renderer (it draws the hovered ghost highlighted). One raycast sweep per mouse move,
+// only while this gizmo is active; each ghost is AABB-pruned inside MeshRaycaster, and
+// fin meshes are small -- cheap enough. GLCanvas3D clears the hover state whenever the
+// Fin gizmo is not the active one.
+void GLGizmoFin::update_ghost_hover(const wxMouseEvent& mouse_event)
+{
+    const Vec2d   mouse_pos(double(mouse_event.GetX()), double(mouse_event.GetY()));
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Model&  model  = wxGetApp().plater()->model();
+
+    FinGhostRef hover;
+    if (const std::optional<FinPick> hit = m_parent.fin_ghosts().pick(mouse_pos, camera, model);
+        hit.has_value())
+        hover = FinGhostRef{ hit->object_id, hit->instance_id, hit->fin_idx };
+    m_parent.fin_ghosts().set_hovered(hover);
+}
+
+// A left press landed outside every grabber: if it hits a scene ghost, switch to that
+// fin. Same object+instance -> in-place switch (select_fin() commits the current panel
+// first, WYSIWYG). A ghost of another object/instance -> commit, arm the pending fin
+// selection and move the Selection; update_ghost_preview()'s identity_changed path then
+// runs init_from_selection(), which consumes the pending index instead of fins[0].
+// Returns whether the click was consumed.
+bool GLGizmoFin::handle_ghost_click(const wxMouseEvent& mouse_event)
+{
+    const Vec2d   mouse_pos(double(mouse_event.GetX()), double(mouse_event.GetY()));
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Model&  model  = wxGetApp().plater()->model();
+
+    const std::optional<FinPick> hit = m_parent.fin_ghosts().pick(mouse_pos, camera, model);
+    if (!hit.has_value())
+        return false;
+
+    const Selection& selection = m_parent.get_selection();
+    if (hit->object_idx == selection.get_object_idx() && hit->instance_idx == selection.get_instance_idx()) {
+        select_fin(hit->fin_idx);
+    } else {
+        apply_to_model(_u8L("Edit fin")); // commit BEFORE the selection moves off this object
+        m_pending_selection = PendingFinSelection{ hit->object_id, hit->fin_idx };
+        m_parent.get_selection().add_instance(unsigned(hit->object_idx), unsigned(hit->instance_idx), true);
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT)); // sync the sidebar object list
+    }
+    return true;
 }
 
 Transform3d GLGizmoFin::plane_matrix() const
@@ -583,8 +642,8 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
-// Switch the edited fin within the current object (arrow buttons; phase 03 of design 03
-// will route ghost clicks here as well). WYSIWYG: the panel state is committed first, so
+// Switch the edited fin within the current object (arrow buttons and same-object ghost
+// clicks -- handle_ghost_click()). WYSIWYG: the panel state is committed first, so
 // the fin the user navigates away from keeps exactly what its ghost showed.
 void GLGizmoFin::select_fin(int fin_idx)
 {

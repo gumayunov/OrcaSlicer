@@ -67,9 +67,9 @@ class GLGizmoFin : public GLGizmoBase
     // commits the panel first (WYSIWYG), so unselected fins always show committed state.
     int m_fin_idx{ 0 };
 
-    // The fin to select once the Selection switch lands. Today set only by data_changed()'s
-    // undo/redo re-selection (keeping the edited fin index across a restore); design 03
-    // phase 03 adds ghost-click cross-object/instance switching as a second producer.
+    // The fin to select once the Selection switch lands. Set by data_changed()'s
+    // undo/redo re-selection (keeping the edited fin index across a restore) and by
+    // handle_ghost_click()'s cross-object/instance switch (design 03 phase 03).
     // Consumed and cleared by init_from_selection(); ignored there when the selected
     // object no longer matches.
     struct PendingFinSelection { ObjectID object; int fin_idx{ -1 }; };
@@ -183,6 +183,10 @@ private:
     void       select_fin(int fin_idx);            // WYSIWYG-commit current, then load fins[fin_idx]
     void       add_fin();                          // commit current, create + select a new default fin
     int        stored_fin_count() const;
+
+    // Ghost-click fin selection (design 03).
+    void update_ghost_hover(const wxMouseEvent& mouse_event);
+    bool handle_ghost_click(const wxMouseEvent& mouse_event);
 
     // Snapshot-free commit halves; apply_to_model()/add_fin() own the undo snapshots.
     struct PanelCommit { FinFeature fin_world; FinFeature fin_object; bool changes_model; };
