@@ -246,6 +246,14 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
     if (use_grabbers(mouse_event))
         return true;
 
+    if (mouse_event.Leaving()) {
+        // The canvas only clears the hover state when this gizmo is NOT current
+        // (_render_fin_ghosts()); leaving the canvas with the gizmo open would
+        // otherwise freeze the last hover highlight until the pointer returns.
+        m_parent.fin_ghosts().set_hovered(FinGhostRef{});
+        return false;
+    }
+
     // Ghost hover highlight (design 03): observe-only -- never consume moves.
     if (mouse_event.Moving()) {
         update_ghost_hover(mouse_event);
