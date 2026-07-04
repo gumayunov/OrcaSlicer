@@ -13,6 +13,7 @@
 #include <glad/gl.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace Slic3r {
 namespace GUI {
@@ -21,6 +22,10 @@ namespace FinGhost {
 
 // Ghost preview mesh color: ColorRGBA::ORANGE() at preview alpha.
 static const ColorRGBA GhostColor = ColorRGBA(0.923f, 0.504f, 0.264f, 0.45f);
+
+// Hovered pick target (design 03): same hue, brighter and more opaque, so clickability
+// is visible without stealing attention from the edited fin.
+static const ColorRGBA GhostHoverColor = ColorRGBA(1.0f, 0.62f, 0.35f, 0.65f);
 
 // The edited print preset's layer height, or `fallback` when no usable print config is
 // loaded (e.g. running headless). The two call sites need different fallbacks: a UI
@@ -68,15 +73,21 @@ double preview_line_width()
     return 0.4; // mm -- generic default, only reached without a usable print/printer config
 }
 
-bool build_ghost(GLModel& out, const indexed_triangle_set& solid_bed, const FinFeature& fin_bed)
+bool build_ghost(GLModel& out, const indexed_triangle_set& solid_bed, const FinFeature& fin_bed,
+                 TriangleMesh* mesh_out)
 {
-    const TriangleMesh mesh = generate_one_fin(solid_bed, fin_bed, preview_layer_height(), preview_line_width());
+    TriangleMesh mesh = generate_one_fin(solid_bed, fin_bed, preview_layer_height(), preview_line_width());
 
     out.reset();
-    if (mesh.empty())
+    if (mesh.empty()) {
+        if (mesh_out != nullptr)
+            *mesh_out = TriangleMesh();
         return false;
+    }
     out.init_from(mesh);
     out.set_color(GhostColor);
+    if (mesh_out != nullptr)
+        *mesh_out = std::move(mesh);
     return true;
 }
 
@@ -120,7 +131,7 @@ void render(GLModel& ghost, const Transform3d& model_matrix)
 
 } // namespace FinGhost
 
-void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& volumes, const ObjectID& skip_object)
+void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& volumes)
 {
     for (auto& [key, entry] : m_entries)
         entry.visited = false;
@@ -137,7 +148,7 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
 
     for (int object_idx = 0; object_idx < int(model.objects.size()); ++object_idx) {
         const ModelObject* mo = model.objects[object_idx];
-        if (mo == nullptr || mo->id() == skip_object)
+        if (mo == nullptr)
             continue;
         if (mo->fins.empty())
             continue;
@@ -197,8 +208,17 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
             if (!entry.generated)
                 continue; // throttled away before the very first generation
 
-            for (const auto& ghost : entry.ghosts)
-                FinGhost::render(*ghost, delta);
+            entry.last_delta = delta;
+            for (const auto& ghost : entry.ghosts) {
+                if (m_selected.valid() && mo->id() == m_selected.object && ghost.fin_idx == m_selected.fin_idx)
+                    continue; // the Fin gizmo draws this fin's live ghost itself (design 03)
+                const bool hovered = m_hovered.valid() && mo->id() == m_hovered.object
+                                  && instance->id() == m_hovered.instance
+                                  && ghost.fin_idx == m_hovered.fin_idx;
+                // set_color() is a plain stored-value write -- cheap to do per frame.
+                ghost.model->set_color(hovered ? FinGhost::GhostHoverColor : FinGhost::GhostColor);
+                FinGhost::render(*ghost.model, delta);
+            }
         }
     }
 
@@ -220,14 +240,66 @@ void FinGhostsRenderer::regenerate(Entry& entry, const ModelObject& object, cons
     const indexed_triangle_set solid = FinGeneratorInternal::object_solid_bed(object, to_bed);
     if (solid.indices.empty())
         return;
-    for (const FinFeature& fin : object.fins) {
-        const std::optional<FinFeature> fin_bed = FinGeneratorInternal::fin_object_to_bed(fin, to_bed);
+    for (int fin_idx = 0; fin_idx < int(object.fins.size()); ++fin_idx) {
+        const std::optional<FinFeature> fin_bed =
+            FinGeneratorInternal::fin_object_to_bed(object.fins[fin_idx], to_bed);
         if (!fin_bed.has_value())
             continue;
-        auto ghost = std::make_unique<GLModel>();
-        if (FinGhost::build_ghost(*ghost, solid, *fin_bed))
-            entry.ghosts.push_back(std::move(ghost));
+        Entry::Ghost ghost;
+        ghost.model = std::make_unique<GLModel>();
+        TriangleMesh mesh;
+        if (!FinGhost::build_ghost(*ghost.model, solid, *fin_bed, &mesh))
+            continue;
+        ghost.raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(mesh)));
+        ghost.fin_idx   = fin_idx;
+        entry.ghosts.push_back(std::move(ghost));
     }
+}
+
+std::optional<FinPick> FinGhostsRenderer::pick(const Vec2d& mouse_pos, const Camera& camera, const Model& model) const
+{
+    // Entries are keyed by stable ObjectIDs; Selection wants indices -- resolve via the
+    // live model. An entry whose object/instance vanished since the last render simply
+    // fails the lookup (GC happens on render, not here).
+    std::map<size_t, int>                    object_idx_by_id;
+    std::map<std::pair<size_t, size_t>, int> instance_idx_by_id;
+    for (int oi = 0; oi < int(model.objects.size()); ++oi) {
+        const ModelObject* mo = model.objects[oi];
+        if (mo == nullptr)
+            continue;
+        object_idx_by_id[mo->id().id] = oi;
+        for (int ii = 0; ii < int(mo->instances.size()); ++ii)
+            instance_idx_by_id[{ mo->id().id, mo->instances[ii]->id().id }] = ii;
+    }
+
+    std::optional<FinPick> best;
+    double                 best_dist = std::numeric_limits<double>::max();
+    for (const auto& [key, entry] : m_entries) {
+        if (!entry.generated)
+            continue;
+        const auto oi = object_idx_by_id.find(key.first);
+        const auto ii = instance_idx_by_id.find(key);
+        if (oi == object_idx_by_id.end() || ii == instance_idx_by_id.end())
+            continue;
+        for (const auto& ghost : entry.ghosts) {
+            if (m_selected.valid() && ObjectID(key.first) == m_selected.object
+                && ghost.fin_idx == m_selected.fin_idx)
+                continue; // not drawn => not pickable
+            if (ghost.raycaster == nullptr)
+                continue;
+            Vec3f position, normal;
+            if (!ghost.raycaster->closest_hit(mouse_pos, entry.last_delta, camera, position, normal))
+                continue;
+            const Vec3d  world = entry.last_delta * position.cast<double>();
+            const double dist  = (world - camera.get_position()).norm();
+            if (dist < best_dist) {
+                best_dist = dist;
+                best      = FinPick{ oi->second, ii->second, ghost.fin_idx,
+                                     ObjectID(key.first), ObjectID(key.second) };
+            }
+        }
+    }
+    return best;
 }
 
 } // namespace GUI

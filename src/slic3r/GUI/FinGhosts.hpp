@@ -5,6 +5,7 @@
 // (added in T01-00-03) -- the always-visible per-(object x instance) scene ghosts.
 
 #include "slic3r/GUI/GLModel.hpp"
+#include "slic3r/GUI/MeshUtils.hpp" // MeshRaycaster (complete type needed for unique_ptr member)
 #include "libslic3r/Model.hpp" // FinFeature / FinFeatures, ModelObject
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -21,6 +23,8 @@ class Model;
 class GLVolumeCollection;
 
 namespace GUI {
+
+class Camera;
 
 namespace FinGhost {
 
@@ -33,9 +37,12 @@ double preset_layer_height(double fallback);
 double preview_layer_height();
 double preview_line_width();
 
-// Fill `out` from generate_one_fin() over a bed-frame solid + bed-frame fin.
-// Returns false (leaving `out` reset) when the fin misses the solid (empty mesh).
-bool build_ghost(GLModel& out, const indexed_triangle_set& solid_bed, const FinFeature& fin_bed);
+// Fill `out` from generate_one_fin() over a bed-frame solid + bed-frame fin. Returns
+// false (leaving `out` reset) when the fin misses the solid (empty mesh). When
+// `mesh_out` is non-null it receives the generated mesh (for building a MeshRaycaster;
+// GLModel won't keep the CPU geometry around).
+bool build_ghost(GLModel& out, const indexed_triangle_set& solid_bed, const FinFeature& fin_bed,
+                 TriangleMesh* mesh_out = nullptr);
 
 // Render a built ghost translucently (gouraud_light + blend, depth test on).
 // `model_matrix` is an extra bed-frame transform: identity for a freshly generated
@@ -43,6 +50,28 @@ bool build_ghost(GLModel& out, const indexed_triangle_set& solid_bed, const FinF
 void render(GLModel& ghost, const Transform3d& model_matrix);
 
 } // namespace FinGhost
+
+// Identifies one fin ghost in the scene: the owning object, optionally a single instance
+// (invalid ObjectID => every instance of the object), and the fin's index within
+// ModelObject::fins. Default-constructed == "none".
+struct FinGhostRef
+{
+    ObjectID object;
+    ObjectID instance;      // invalid => any instance of `object`
+    int      fin_idx{ -1 };
+    bool valid() const { return object.id != 0 && fin_idx >= 0; }
+};
+
+// pick() result: model indices for Selection::add_instance() plus the stable ids they
+// were resolved from (callers re-validate against the live Model at use time).
+struct FinPick
+{
+    int      object_idx;
+    int      instance_idx;
+    int      fin_idx;
+    ObjectID object_id;
+    ObjectID instance_id;
+};
 
 // Always-visible scene ghosts (design 01): one translucent fin preview per
 // (object-with-fins x instance), rendered by GLCanvas3D without the Fin gizmo.
@@ -56,12 +85,24 @@ public:
     // during an interactive drag Selection mutates only GLVolume trafos, ModelInstance
     // catches up on mouse-up (GLCanvas3D::do_move()), so reading GLVolumes keeps ghosts
     // following mid-drag; entries fall back to ModelInstance::get_matrix() when no
-    // GLVolume matches (they coincide outside a drag). `skip_object` suppresses one
-    // object's ghosts entirely -- pass the Fin gizmo's target object while that gizmo
-    // is open (it draws its own live, possibly-unsaved preview); ObjectID() (invalid)
-    // to skip nothing. Skipped objects' entries are GC'd while the gizmo is open, so
-    // closing it costs one immediate regen per instance -- intentional.
-    void render(const Model& model, const GLVolumeCollection& volumes, const ObjectID& skip_object);
+    // GLVolume matches (they coincide outside a drag). The fin set via set_selected() is
+    // suppressed on EVERY instance of its object -- the Fin gizmo draws that fin's live,
+    // possibly-uncommitted ghost itself; everything else (other fins of the same object
+    // included) renders from the committed model and is a valid pick target (design 03).
+    void render(const Model& model, const GLVolumeCollection& volumes);
+
+    // The fin the Fin gizmo currently edits (hidden + unpickable); default-constructed
+    // ref = nothing selected. Pushed by GLCanvas3D::_render_fin_ghosts() every frame.
+    void set_selected(const FinGhostRef& selected) { m_selected = selected; }
+    // The ghost under the mouse (rendered highlighted); pushed by GLGizmoFin on mouse
+    // moves, cleared by GLCanvas3D whenever the Fin gizmo is not active.
+    void set_hovered(const FinGhostRef& hovered) { m_hovered = hovered; }
+
+    // Closest ghost under the mouse ray, or nullopt. Skips the selected fin (not drawn =>
+    // not pickable). Raycasts every cached ghost with the exact model matrix it was drawn
+    // with this frame (Entry::last_delta), so picking always matches the screen -- even a
+    // stale cache riding an affine delta under regeneration throttling.
+    std::optional<FinPick> pick(const Vec2d& mouse_pos, const Camera& camera, const Model& model) const;
 
 private:
     // Everything a ghost was generated from, compared each frame to detect staleness.
@@ -87,7 +128,18 @@ private:
         Transform3d            to_bed{ Transform3d::Identity() };   // instance matrix at generation time
         double                 layer_height{ 0.0 };                 // preset-derived generate_one_fin() inputs
         double                 line_width{ 0.0 };                   //   baked into the ghosts
-        std::vector<std::unique_ptr<GLModel>> ghosts;               // one per fin that produced geometry
+        struct Ghost
+        {
+            std::unique_ptr<GLModel>       model;
+            // Owns a copy of the ghost mesh: GLModel frees its CPU-side geometry after the
+            // first render uploads it to the GPU, so raycasting needs its own copy.
+            std::unique_ptr<MeshRaycaster> raycaster;
+            int                            fin_idx{ -1 }; // index into ModelObject::fins (fins
+                                                          // with no geometry produce no Ghost)
+        };
+        std::vector<Ghost> ghosts;                        // one per fin that produced geometry
+        // Model matrix the ghosts were last drawn with; pick() must use the same one.
+        Transform3d last_delta{ Transform3d::Identity() };
         std::chrono::steady_clock::time_point last_regen{};         // epoch => "never" => first regen is immediate
         bool generated{ false };                                    // false until the first regeneration ran
         bool visited{ false };                                      // per-frame GC mark
@@ -115,6 +167,9 @@ private:
     double m_layer_height{ 0.0 };
     double m_line_width{ 0.0 };
     std::chrono::steady_clock::time_point m_params_checked{};
+
+    FinGhostRef m_selected;
+    FinGhostRef m_hovered;
 };
 
 } // namespace GUI

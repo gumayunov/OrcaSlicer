@@ -818,6 +818,8 @@ public:
     const GLGizmosManager& get_gizmos_manager() const { return m_gizmos; }
     GLGizmosManager& get_gizmos_manager() { return m_gizmos; }
 
+    FinGhostsRenderer& fin_ghosts() { return m_fin_ghosts; }
+
     void bed_shape_changed();
 
     //BBS: add part plate related logic

@@ -437,6 +437,19 @@ ModelObject* GLGizmoFin::selected_model_object() const
     return objects[object_idx];
 }
 
+// The fin this gizmo currently edits, as a scene-ghost reference. Valid only when the
+// panel edits a fin actually stored on the object (an uncommitted fresh default has no
+// scene ghost to hide). Instance is left invalid deliberately: the fin is hidden on
+// EVERY instance while being edited -- only the gizmo's own live ghost (drawn in the
+// selected instance's frame) represents it.
+FinGhostRef GLGizmoFin::selected_fin_ref() const
+{
+    const ModelObject* mo = selected_model_object();
+    if (mo == nullptr || size_t(m_fin_idx) >= mo->fins.size())
+        return {};
+    return FinGhostRef{ mo->id(), ObjectID(), m_fin_idx };
+}
+
 // The selected instance's current world transform (to_bed for this gizmo's purposes -- its
 // world frame IS the bed frame, see the class doc comment). A fresh lookup, deliberately
 // decoupled from the ghost-preview solid cache's m_solid_instance_matrix (that one is only

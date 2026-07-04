@@ -3,6 +3,7 @@
 
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/GLModel.hpp"
+#include "slic3r/GUI/FinGhosts.hpp" // FinGhostRef (returned by value from selected_fin_ref())
 
 // Complete type needed: m_object_solid_bed below is a by-value indexed_triangle_set member
 // (the ghost-preview solid cache, T00-04-04), not just a reference/pointer.
@@ -127,6 +128,8 @@ public:
 
     bool on_mouse(const wxMouseEvent& mouse_event) override;
     void data_changed(bool is_serializing) override;
+
+    FinGhostRef selected_fin_ref() const;
 
 protected:
     bool        on_init() override;
