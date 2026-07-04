@@ -59,6 +59,24 @@ void GLGizmoFin::on_set_state()
         // gizmo was last open even if the same instance is re-selected -- always rebuild fresh
         // on activation rather than relying solely on the object/instance-idx comparison.
         rebuild_object_solid();
+    } else {
+        // WYSIWYG close (T01-00-06): what the ghost showed is what gets kept -- commit the
+        // panel state, including the untouched defaults of a freshly opened gizmo and a
+        // typed-but-not-yet-committed field edit (its value already lives in the m_* state;
+        // the per-gesture commit path would only pick it up on the NEXT ImGui frame, which
+        // never comes once the gizmo closes). No-op when nothing changed (apply_to_model()
+        // compares) or right after "Remove fin" (m_apply_on_close).
+        //
+        // Selection may already have moved on by the time this runs (e.g. the gizmo was
+        // deactivated by clicking empty space or selecting a different object/sub-volume) --
+        // only commit while the selection still points at the object/instance this panel
+        // state belongs to; every completed gesture was already persisted individually via
+        // apply_to_model(), so skipping here loses nothing.
+        const Selection& selection = m_parent.get_selection();
+        if (m_apply_on_close
+            && selection.get_object_idx() == m_solid_object_idx
+            && selection.get_instance_idx() == m_solid_instance_idx)
+            apply_to_model(_u8L("Edit fin"));
     }
 }
 
@@ -96,6 +114,7 @@ void GLGizmoFin::data_changed(bool is_serializing)
 // elsewhere into an orientation where the fin's plane axis is no longer horizontal).
 void GLGizmoFin::init_from_selection()
 {
+    m_apply_on_close = true; // fresh per activation/object -- re-arm the WYSIWYG close-commit (T01-00-06)
     const ModelObject* mo = selected_model_object();
     if (mo != nullptr && !mo->fins.empty()) {
         if (const std::optional<Transform3d> to_bed = selected_instance_matrix(); to_bed.has_value()) {
@@ -340,6 +359,24 @@ void GLGizmoFin::update_ghost_preview()
 
 // --- Persistence (T00-04-05) -------------------------------------------------
 
+// Approximate FinFeature equality for the "did the user actually change anything" check in
+// apply_to_model(): the stored fin round-trips through fin_object_to_bed()/fin_bed_to_object()
+// while the gizmo is open, which is exact only up to floating-point noise -- exact operator==
+// would see phantom diffs and take a spurious undo snapshot on every gizmo close.
+static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
+{
+    constexpr double eps = 1e-9;
+    return a.enabled == b.enabled
+        && std::abs(a.anchor_xy.x() - b.anchor_xy.x()) < eps
+        && std::abs(a.anchor_xy.y() - b.anchor_xy.y()) < eps
+        && std::abs(a.z_angle   - b.z_angle)   < eps
+        && std::abs(a.height    - b.height)    < eps
+        && std::abs(a.length    - b.length)    < eps
+        && std::abs(a.thickness - b.thickness) < eps
+        && std::abs(a.conn_step - b.conn_step) < eps
+        && std::abs(a.conn_gap  - b.conn_gap)  < eps;
+}
+
 ModelObject* GLGizmoFin::selected_model_object() const
 {
     const Selection& selection  = m_parent.get_selection();
@@ -380,7 +417,19 @@ std::optional<Transform3d> GLGizmoFin::selected_instance_matrix() const
 // how e.g. GLGizmoFdmSupports/GLGizmoBrimEars commit paint/point edits onto their ModelObject.
 // No-op (nothing persisted, no snapshot taken) when there is no valid single-instance selection,
 // or when the instance transform degenerates the fin's local axes (fin_bed_to_object() returns
-// nullopt -- see its doc comment); the latter is logged since it silently drops the edit.
+// nullopt -- see its doc comment); the latter is logged since it silently drops the edit. Also a
+// no-op when the converted fin is approximately equal to what is already stored (fins_approx_equal()
+// above) -- this is what makes the WYSIWYG close-commit in on_set_state() harmless to call on every
+// gizmo close, even when nothing actually changed.
+//
+// Full persistence contract for the Fin gizmo (T01-00-06): every completed user gesture (drag-end,
+// an ImGui field's IsItemDeactivatedAfterEdit(), the Enabled checkbox, Flip) calls this function
+// directly. On top of that, closing the gizmo (toolbar re-click, Esc, switching to another gizmo)
+// also calls this function once from on_set_state()'s Off branch, committing whatever the panel/ghost
+// was showing at close time (WYSIWYG) -- including untouched defaults on a freshly opened gizmo and a
+// typed-but-not-yet-committed field edit. The ONLY way to delete a stored fin is the "Remove fin"
+// button (remove_fin_from_model()); the close-commit never deletes, and m_apply_on_close suppresses
+// it from immediately resurrecting a just-removed fin.
 void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
 {
     ModelObject* mo = selected_model_object();
@@ -407,11 +456,15 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
         return;
     }
 
+    if (!mo->fins.empty() && fins_approx_equal(mo->fins.front(), *fin_object))
+        return; // nothing actually changed -- don't pollute the undo stack
+
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
     BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";
     if (mo->fins.empty())
         mo->fins.push_back(FinFeature{});
     mo->fins.front() = *fin_object;
+    m_apply_on_close = true; // any explicit commit re-arms the WYSIWYG close-commit
 
     wxGetApp().plater()->set_plater_dirty(true);
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -420,7 +473,10 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
 // "Remove fin" button (T00-04-05): clears the object's fins outright -- unlike the Enabled
 // checkbox (which persists enabled=false and leaves the stored fin otherwise intact, see
 // on_render_input_window()), this is how the user actually gets rid of one. No-op when the
-// object has no fin to remove (nothing to snapshot).
+// object has no fin to remove (nothing to snapshot). Also suppresses the WYSIWYG close-commit
+// (m_apply_on_close, T01-00-06): the panel still holds the removed fin's parameters and the ghost
+// stays visible, so without this, closing the gizmo right after Remove would immediately
+// resurrect the fin the user just deleted.
 void GLGizmoFin::remove_fin_from_model()
 {
     ModelObject* mo = selected_model_object();
@@ -430,6 +486,7 @@ void GLGizmoFin::remove_fin_from_model()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove fin"), UndoRedo::SnapshotType::GizmoAction);
     BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot 'Remove fin', clearing fins";
     mo->fins.clear();
+    m_apply_on_close = false;
 
     wxGetApp().plater()->set_plater_dirty(true);
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));

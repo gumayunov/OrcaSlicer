@@ -57,6 +57,13 @@ class GLGizmoFin : public GLGizmoBase
     double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
     bool   m_enabled{ true };   // toggled by the panel checkbox; semantics land in T00-04-05
 
+    // WYSIWYG close-commit (T01-00-06): suppresses the close-time apply_to_model() call
+    // (on_set_state()'s Off branch) right after "Remove fin" -- without it, closing the gizmo
+    // would immediately resurrect the fin the user just deleted (the panel still holds its
+    // parameters and the ghost is still shown). Any subsequent commit gesture deliberately
+    // re-creates the fin and lifts the suppression.
+    bool m_apply_on_close{ true };
+
     double m_snap_step{ 1.0 };              // mm, translation / length snap with Shift held
 
     // ImGui side panel layout (mirrors GLGizmoCut3D's m_label_width / m_control_width idiom).
