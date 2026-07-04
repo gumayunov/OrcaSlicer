@@ -137,8 +137,8 @@ void GLGizmoFin::init_from_selection()
         if (const std::optional<Transform3d> to_bed = selected_instance_matrix(); to_bed.has_value()) {
             if (const std::optional<FinFeature> fin_world = FinGeneratorInternal::fin_object_to_bed(mo->fins.front(), *to_bed);
                 fin_world.has_value()) {
-                m_plane_center = Vec3d(fin_world->anchor_xy.x(), fin_world->anchor_xy.y(), 0.0);
-                m_z_angle      = fin_world->z_angle;
+                m_plane_center = Vec3d(fin_world->anchor.x(), fin_world->anchor.y(), 0.0);
+                m_z_angle      = FinGeneratorInternal::z_angle_from_dir(fin_world->dir);
                 m_height       = fin_world->height;
                 m_length       = fin_world->length;
                 m_thickness    = fin_world->thickness;
@@ -362,8 +362,8 @@ void GLGizmoFin::update_ghost_preview()
     // panel's Enabled toggle -- the toggle only affects what gets persisted/sliced (apply_to_model()
     // below), not this live preview.
     FinFeature fin_bed_frame;
-    fin_bed_frame.anchor_xy = Vec2d(m_plane_center.x(), m_plane_center.y());
-    fin_bed_frame.z_angle   = m_z_angle;
+    fin_bed_frame.anchor = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
+    fin_bed_frame.dir    = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
     fin_bed_frame.height    = m_height;
     fin_bed_frame.length    = m_length;
     fin_bed_frame.thickness = m_thickness;
@@ -383,13 +383,17 @@ void GLGizmoFin::update_ghost_preview()
 static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
 {
     constexpr double eps = 1e-9;
+    // Angles are no longer stored (design 02): anchor and dir are both derived through a
+    // deterministic conversion chain and dir stays normalized, so a plain componentwise
+    // comparison suffices -- unlike the old z_angle, there is no +/-PI branch cut to fold away,
+    // and dir vs -dir are genuinely different sides, not an artifact to treat as equal.
     return a.enabled == b.enabled
-        && std::abs(a.anchor_xy.x() - b.anchor_xy.x()) < eps
-        && std::abs(a.anchor_xy.y() - b.anchor_xy.y()) < eps
-        // z_angle compares modulo 2*PI: both conversions derive it via atan2 (range (-PI, PI]),
-        // so a heading of ~ +/-PI can round-trip to the opposite sign -- a naive |a - b| would
-        // then be ~2*PI at the branch cut and flag a phantom diff on every close.
-        && std::abs(std::remainder(a.z_angle - b.z_angle, 2.0 * PI)) < eps
+        && std::abs(a.anchor.x() - b.anchor.x()) < eps
+        && std::abs(a.anchor.y() - b.anchor.y()) < eps
+        && std::abs(a.anchor.z() - b.anchor.z()) < eps
+        && std::abs(a.dir.x() - b.dir.x()) < eps
+        && std::abs(a.dir.y() - b.dir.y()) < eps
+        && std::abs(a.dir.z() - b.dir.z()) < eps
         && std::abs(a.height    - b.height)    < eps
         && std::abs(a.length    - b.length)    < eps
         && std::abs(a.thickness - b.thickness) < eps
@@ -462,8 +466,8 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
         return;
 
     FinFeature fin_world;
-    fin_world.anchor_xy = Vec2d(m_plane_center.x(), m_plane_center.y());
-    fin_world.z_angle   = m_z_angle;
+    fin_world.anchor = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
+    fin_world.dir    = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
     fin_world.height    = m_height;
     fin_world.length    = m_length;
     fin_world.thickness = m_thickness;
@@ -679,7 +683,7 @@ void GLGizmoFin::on_stop_dragging()
     m_drag_ref_captured = false;
     // T00-04-04: rebuild the ghost preview once dragging ends -- not per drag frame. All four
     // grabbers (Move/ZRotation/TopHeight/OuterLength) feed generate_one_fin() one way or
-    // another (anchor_xy, z_angle, height, length), so any drag can invalidate the cached mesh.
+    // another (anchor, dir, height, length), so any drag can invalidate the cached mesh.
     m_ghost_dirty = true;
 
     // T00-04-05: persist on drag-end -- one snapshot per drag gesture (never per drag frame).

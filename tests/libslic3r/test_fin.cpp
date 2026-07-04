@@ -59,8 +59,10 @@ TEST_CASE("fins survive ModelObject copy", "[fin]")
 TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
 {
     FinFeature src;
-    src.anchor_xy = Vec2d(1.5, -2.5);
-    src.z_angle   = 0.75;
+    // Non-default, non-zero on every component (incl. anchor/dir's Z) so a component dropped by
+    // serialize() can't hide behind a default-initialized match.
+    src.anchor    = Vec3d(1.5, -2.5, 3.5);
+    src.dir       = Vec3d(0.6, -0.8, 0.25);
     src.height    = 21.0;
     src.length    = 6.5;
     src.thickness = 0.9;
@@ -80,9 +82,12 @@ TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
         iarchive(dst);
     }
 
-    CHECK_THAT(dst.anchor_xy.x(), WithinAbs(1.5, 1e-9));
-    CHECK_THAT(dst.anchor_xy.y(), WithinAbs(-2.5, 1e-9));
-    CHECK_THAT(dst.z_angle, WithinAbs(0.75, 1e-9));
+    CHECK_THAT(dst.anchor.x(), WithinAbs(1.5, 1e-9));
+    CHECK_THAT(dst.anchor.y(), WithinAbs(-2.5, 1e-9));
+    CHECK_THAT(dst.anchor.z(), WithinAbs(3.5, 1e-9));
+    CHECK_THAT(dst.dir.x(), WithinAbs(0.6, 1e-9));
+    CHECK_THAT(dst.dir.y(), WithinAbs(-0.8, 1e-9));
+    CHECK_THAT(dst.dir.z(), WithinAbs(0.25, 1e-9));
     CHECK_THAT(dst.height, WithinAbs(21.0, 1e-9));
     CHECK_THAT(dst.length, WithinAbs(6.5, 1e-9));
     CHECK_THAT(dst.thickness, WithinAbs(0.9, 1e-9));
@@ -138,11 +143,11 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
     o->add_instance();
 
-    // Non-default values on every field, including the Vec2d and the bool, so
+    // Non-default values on every field, including anchor/dir's Z components and the bool, so
     // the roundtrip actually exercises all of FinFeature's persisted state.
     FinFeature f1;
-    f1.anchor_xy = Vec2d(3.25, -1.75);
-    f1.z_angle   = 1.23;
+    f1.anchor    = Vec3d(3.25, -1.75, 2.5);
+    f1.dir       = Vec3d(0.6, 0.72, -0.36);
     f1.height    = 17.5;
     f1.length    = 9.25;
     f1.thickness = 1.4;
@@ -152,8 +157,8 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     o->fins.push_back(f1);
 
     FinFeature f2;
-    f2.anchor_xy = Vec2d(-4.5, 6.125);
-    f2.z_angle   = -2.5;
+    f2.anchor    = Vec3d(-4.5, 6.125, -3.0);
+    f2.dir       = Vec3d(-0.8, 0.48, 0.36);
     f2.height    = 8.0;
     f2.length    = 3.0;
     f2.thickness = 0.8;
@@ -173,9 +178,12 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     REQUIRE(dst.objects.front()->fins.size() == 2);
 
     const FinFeature& r1 = dst.objects.front()->fins[0];
-    CHECK_THAT(r1.anchor_xy.x(), WithinAbs(f1.anchor_xy.x(), 1e-6));
-    CHECK_THAT(r1.anchor_xy.y(), WithinAbs(f1.anchor_xy.y(), 1e-6));
-    CHECK_THAT(r1.z_angle,       WithinAbs(f1.z_angle, 1e-6));
+    CHECK_THAT(r1.anchor.x(),    WithinAbs(f1.anchor.x(), 1e-6));
+    CHECK_THAT(r1.anchor.y(),    WithinAbs(f1.anchor.y(), 1e-6));
+    CHECK_THAT(r1.anchor.z(),    WithinAbs(f1.anchor.z(), 1e-6));
+    CHECK_THAT(r1.dir.x(),       WithinAbs(f1.dir.x(), 1e-6));
+    CHECK_THAT(r1.dir.y(),       WithinAbs(f1.dir.y(), 1e-6));
+    CHECK_THAT(r1.dir.z(),       WithinAbs(f1.dir.z(), 1e-6));
     CHECK_THAT(r1.height,        WithinAbs(f1.height, 1e-6));
     CHECK_THAT(r1.length,        WithinAbs(f1.length, 1e-6));
     CHECK_THAT(r1.thickness,     WithinAbs(f1.thickness, 1e-6));
@@ -184,9 +192,12 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     CHECK(r1.enabled == f1.enabled);
 
     const FinFeature& r2 = dst.objects.front()->fins[1];
-    CHECK_THAT(r2.anchor_xy.x(), WithinAbs(f2.anchor_xy.x(), 1e-6));
-    CHECK_THAT(r2.anchor_xy.y(), WithinAbs(f2.anchor_xy.y(), 1e-6));
-    CHECK_THAT(r2.z_angle,       WithinAbs(f2.z_angle, 1e-6));
+    CHECK_THAT(r2.anchor.x(),    WithinAbs(f2.anchor.x(), 1e-6));
+    CHECK_THAT(r2.anchor.y(),    WithinAbs(f2.anchor.y(), 1e-6));
+    CHECK_THAT(r2.anchor.z(),    WithinAbs(f2.anchor.z(), 1e-6));
+    CHECK_THAT(r2.dir.x(),       WithinAbs(f2.dir.x(), 1e-6));
+    CHECK_THAT(r2.dir.y(),       WithinAbs(f2.dir.y(), 1e-6));
+    CHECK_THAT(r2.dir.z(),       WithinAbs(f2.dir.z(), 1e-6));
     CHECK_THAT(r2.height,        WithinAbs(f2.height, 1e-6));
     CHECK_THAT(r2.length,        WithinAbs(f2.length, 1e-6));
     CHECK_THAT(r2.thickness,     WithinAbs(f2.thickness, 1e-6));
@@ -293,19 +304,111 @@ TEST_CASE("fin: corrupt fin_information.xml in a 3mf does not abort project load
     CHECK(dst.objects.front()->fins.empty()); // fins skipped gracefully; rest of the project intact
 }
 
+TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angle, no dir_x) migrates on load",
+          "[fin]")
+{
+    // Design 02 §3/Goal 4: a .3mf saved by a pre-design-02 build only ever wrote
+    // anchor_x/anchor_y/z_angle (2D object-local anchor + azimuth about the object Z axis), never
+    // dir_x/dir_y/dir_z. _extract_fin_information_from_archive() must detect the absence of
+    // dir_x and migrate on the fly: anchor = (anchor_x, anchor_y, 0), dir = dir_from_z_angle(z_angle)
+    // -- built the same way the corrupt-xml test above reaches load_bbs_3mf() (hand-replacing just
+    // fin_information.xml inside a real archive), so this exercises the real load path end to end.
+    Model        m;
+    ModelObject* o = m.add_object();
+    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
+    o->add_instance();
+    o->fins.push_back(FinFeature{});
+
+    if (temporary_dir().empty())
+        set_temporary_dir(std::filesystem::temp_directory_path().string());
+
+    std::string good_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_legacy_source.3mf";
+    std::string legacy_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_legacy.3mf";
+
+    DynamicPrintConfig store_config;
+    StoreParams        store_params;
+    store_params.path     = good_path.c_str();
+    store_params.model    = &m;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    const double legacy_anchor_x = 5.5, legacy_anchor_y = -2.25, legacy_z_angle = 0.9;
+
+    // Copy every zip entry verbatim except fin_information.xml, replaced with a hand-written
+    // legacy-format document (no dir_x/dir_y/dir_z at all).
+    {
+        mz_zip_archive reader{};
+        REQUIRE(open_zip_reader(&reader, good_path));
+        mz_zip_archive writer{};
+        REQUIRE(open_zip_writer(&writer, legacy_path));
+
+        std::ostringstream legacy_xml;
+        legacy_xml << "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
+                   << "anchor_x=\"" << legacy_anchor_x << "\" "
+                   << "anchor_y=\"" << legacy_anchor_y << "\" "
+                   << "z_angle=\"" << legacy_z_angle << "\" "
+                   << "height=\"10\" length=\"8\" thickness=\"1.2\" conn_step=\"4\" conn_gap=\"1\" "
+                   << "enabled=\"1\"/></object></fins>";
+        std::string legacy_str = legacy_xml.str();
+
+        const mz_uint n_entries = mz_zip_reader_get_num_files(&reader);
+        for (mz_uint i = 0; i < n_entries; ++i) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
+            if (std::string(stat.m_filename) == "Metadata/fin_information.xml") {
+                REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, legacy_str.data(), legacy_str.size(),
+                                               MZ_DEFAULT_COMPRESSION));
+            } else {
+                REQUIRE(mz_zip_writer_add_from_zip_reader(&writer, &reader, i));
+            }
+        }
+        REQUIRE(mz_zip_writer_finalize_archive(&writer));
+        REQUIRE(close_zip_writer(&writer));
+        REQUIRE(close_zip_reader(&reader));
+    }
+    boost::filesystem::remove(good_path);
+
+    DynamicPrintConfig        load_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plate_data_list;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    Model                     dst;
+    bool load_ok = load_bbs_3mf(legacy_path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
+                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
+                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(plate_data_list);
+    boost::filesystem::remove(legacy_path);
+
+    REQUIRE(load_ok);
+    REQUIRE(dst.objects.size() == 1);
+    REQUIRE(dst.objects.front()->fins.size() == 1);
+
+    const FinFeature& f = dst.objects.front()->fins.front();
+    CHECK_THAT(f.anchor.x(), WithinAbs(legacy_anchor_x, 1e-9));
+    CHECK_THAT(f.anchor.y(), WithinAbs(legacy_anchor_y, 1e-9));
+    CHECK_THAT(f.anchor.z(), WithinAbs(0.0, 1e-9));
+    const Vec3d expected_dir = FinGeneratorInternal::dir_from_z_angle(legacy_z_angle);
+    CHECK_THAT(f.dir.x(), WithinAbs(expected_dir.x(), 1e-9));
+    CHECK_THAT(f.dir.y(), WithinAbs(expected_dir.y(), 1e-9));
+    CHECK_THAT(f.dir.z(), WithinAbs(expected_dir.z(), 1e-9));
+}
+
 // --- FinGenerator: plane-frame <-> bed-frame -------------------------------
 
 TEST_CASE("plane_to_bed maps the local origin to the anchor", "[fin]")
 {
     FinFeature f;
-    f.anchor_xy = Vec2d(3.0, -4.0);
-    f.z_angle   = 0.37; // arbitrary, non-axis-aligned
+    f.anchor = Vec3d(3.0, -4.0, 0.0);
+    f.dir    = FinGeneratorInternal::dir_from_z_angle(0.37); // arbitrary, non-axis-aligned
 
     Transform3d plane_to_bed = FinGeneratorInternal::plane_to_bed(f);
     Vec3d       p            = plane_to_bed * Vec3d(0.0, 0.0, 0.0);
 
-    CHECK_THAT(p.x(), WithinAbs(f.anchor_xy.x(), 1e-9));
-    CHECK_THAT(p.y(), WithinAbs(f.anchor_xy.y(), 1e-9));
+    CHECK_THAT(p.x(), WithinAbs(f.anchor.x(), 1e-9));
+    CHECK_THAT(p.y(), WithinAbs(f.anchor.y(), 1e-9));
     CHECK_THAT(p.z(), WithinAbs(0.0, 1e-9));
 }
 
@@ -314,8 +417,8 @@ TEST_CASE("plane_to_bed at z_angle=0 locks the coordinate contract", "[fin]")
     // Design contract (design doc §13): with z_angle = 0, u (local x, outward)
     // maps to world +Y, and n (local z, plane normal) maps to world +X.
     FinFeature f;
-    f.anchor_xy = Vec2d::Zero();
-    f.z_angle   = 0.0;
+    f.anchor = Vec3d::Zero();
+    f.dir    = FinGeneratorInternal::dir_from_z_angle(0.0);
 
     Transform3d plane_to_bed = FinGeneratorInternal::plane_to_bed(f);
     Vec3d       u_world      = plane_to_bed.linear() * Vec3d(1.0, 0.0, 0.0); // local x = u
@@ -336,8 +439,8 @@ TEST_CASE("plane_to_bed at z_angle=PI/2 pins the rotation sign", "[fin]")
     // invisible to the axis test above. Pin it at PI/2:
     // u = (-sin, cos, 0) -> (-1, 0, 0), n = (cos, sin, 0) -> (0, 1, 0), w stays Z.
     FinFeature f;
-    f.anchor_xy = Vec2d::Zero();
-    f.z_angle   = PI / 2.0;
+    f.anchor = Vec3d::Zero();
+    f.dir    = FinGeneratorInternal::dir_from_z_angle(PI / 2.0);
 
     Transform3d plane_to_bed = FinGeneratorInternal::plane_to_bed(f);
     Vec3d       u_world      = plane_to_bed.linear() * Vec3d(1.0, 0.0, 0.0); // local x = u
@@ -360,8 +463,8 @@ TEST_CASE("plane_to_bed at z_angle=PI/2 pins the rotation sign", "[fin]")
 TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
 {
     FinFeature f;
-    f.anchor_xy = Vec2d(1.5, 2.5);
-    f.z_angle   = 1.1;
+    f.anchor = Vec3d(1.5, 2.5, 0.0);
+    f.dir    = FinGeneratorInternal::dir_from_z_angle(1.1);
 
     Transform3d roundtrip = FinGeneratorInternal::bed_to_plane(f) * FinGeneratorInternal::plane_to_bed(f);
     Vec3d       p         = roundtrip * Vec3d(7.0, -3.0, 2.0);
@@ -374,12 +477,13 @@ TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
 // --- FinGenerator: object <-> bed (world) conversion (T00-04-05) -----------
 //
 // fin_object_to_bed()/fin_bed_to_object() are the gizmo's coordinate contract (design doc §13,
-// the T00-04-04 review note): the gizmo edits a fin in the BED (world) frame, but
-// ModelObject::fins stores it OBJECT-LOCAL. fin_object_to_bed() is generate_fin_meshes()'s own
-// per-fin conversion (object -> bed, used to load an existing fin into the gizmo);
-// fin_bed_to_object() is its inverse (bed -> object, used to persist a gizmo edit). Both touch
-// only anchor_xy/z_angle -- the other fields are asserted here too, to catch a field getting
-// dropped by accident, even though the conversion itself never touches them.
+// the T00-04-04 review note; design 02 replaced the 2D anchor_xy/z_angle pair with a full 3D
+// anchor/dir so the conversion survives an instance stood on its side): the gizmo edits a fin in
+// the BED (world) frame, but ModelObject::fins stores it OBJECT-LOCAL. fin_object_to_bed() is
+// generate_fin_meshes()'s own per-fin conversion (object -> bed, used to load an existing fin
+// into the gizmo); fin_bed_to_object() is its inverse (bed -> object, used to persist a gizmo
+// edit). Both touch only anchor/dir -- the other fields are asserted here too, to catch a field
+// getting dropped by accident, even though the conversion itself never touches them.
 
 namespace {
 
@@ -388,8 +492,8 @@ namespace {
 FinFeature roundtrip_test_fin()
 {
     FinFeature f;
-    f.anchor_xy = Vec2d(3.25, -6.75);
-    f.z_angle   = 0.6; // within atan2's (-pi, pi] range, so no wrap ambiguity vs. the recovered angle
+    f.anchor    = Vec3d(3.25, -6.75, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.6); // arbitrary, non-axis-aligned heading
     f.height    = 17.5;
     f.length    = 9.25;
     f.thickness = 0.85;
@@ -401,9 +505,12 @@ FinFeature roundtrip_test_fin()
 
 void check_fins_match(const FinFeature& a, const FinFeature& b, double eps = 1e-9)
 {
-    CHECK_THAT(a.anchor_xy.x(), WithinAbs(b.anchor_xy.x(), eps));
-    CHECK_THAT(a.anchor_xy.y(), WithinAbs(b.anchor_xy.y(), eps));
-    CHECK_THAT(a.z_angle, WithinAbs(b.z_angle, eps));
+    CHECK_THAT(a.anchor.x(), WithinAbs(b.anchor.x(), eps));
+    CHECK_THAT(a.anchor.y(), WithinAbs(b.anchor.y(), eps));
+    CHECK_THAT(a.anchor.z(), WithinAbs(b.anchor.z(), eps));
+    CHECK_THAT(a.dir.x(), WithinAbs(b.dir.x(), eps));
+    CHECK_THAT(a.dir.y(), WithinAbs(b.dir.y(), eps));
+    CHECK_THAT(a.dir.z(), WithinAbs(b.dir.z(), eps));
     CHECK_THAT(a.height, WithinAbs(b.height, eps));
     CHECK_THAT(a.length, WithinAbs(b.length, eps));
     CHECK_THAT(a.thickness, WithinAbs(b.thickness, eps));
@@ -429,72 +536,105 @@ TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: identity to_bed", "
     check_fins_match(f_obj, *f_obj2);
 }
 
-TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: translated + Z-rotated instance", "[fin]")
+TEST_CASE("fin_bed_to_object / fin_object_to_bed round-trip: translated + Z-rotated instance", "[fin]")
 {
+    // Design 02 Goal 2: bed->object->bed is the identity direction (the gizmo commit/load
+    // cycle). object->bed->object deliberately is NOT exact when to_bed lifts the anchor off
+    // z=0 (here: translation.z=3) -- fin_object_to_bed() re-anchors the plane at bed z=0, so
+    // the object-local representative point normalizes on the first pass (design 02 §2).
     using namespace FinGeneratorInternal;
 
     Transform3d to_bed = Transform3d::Identity();
     to_bed.translate(Vec3d(12.0, -7.0, 3.0));
     to_bed.rotate(Eigen::AngleAxisd(1.1, Vec3d::UnitZ()));
 
-    FinFeature f_obj = roundtrip_test_fin();
+    FinFeature f_bed = roundtrip_test_fin(); // anchor.z == 0, dir horizontal: valid bed-frame form
 
-    std::optional<FinFeature> f_bed = fin_object_to_bed(f_obj, to_bed);
-    REQUIRE(f_bed.has_value());
+    std::optional<FinFeature> f_obj = fin_bed_to_object(f_bed, to_bed);
+    REQUIRE(f_obj.has_value());
 
-    std::optional<FinFeature> f_obj2 = fin_bed_to_object(*f_bed, to_bed);
-    REQUIRE(f_obj2.has_value());
+    std::optional<FinFeature> f_bed2 = fin_object_to_bed(*f_obj, to_bed);
+    REQUIRE(f_bed2.has_value());
 
-    check_fins_match(f_obj, *f_obj2);
+    check_fins_match(f_bed, *f_bed2);
 }
 
-TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: instance tipped 30deg about X", "[fin]")
+TEST_CASE("fin_bed_to_object / fin_object_to_bed round-trip: instance tipped 30deg about X", "[fin]")
 {
-    // A partial (non-90deg) tip about a horizontal in-plane axis: the object-local XY plane no
-    // longer projects flush onto the bed, but the projection stays full-rank (its 2x2 XY block's
-    // determinant is cos(30deg) != 0, unlike the exact-90deg case below), so both the anchor and
-    // the azimuth stay recoverable.
+    // A partial (non-90deg) tip about a horizontal in-plane axis: the object-local frame no
+    // longer aligns with the bed, but to_bed stays invertible, so the bed->object->bed cycle
+    // (the gizmo's commit/load direction, design 02 Goal 2) is still exact. The opposite
+    // direction would NOT be: the tip gives the stored dir's bed image a vertical component,
+    // which fin_object_to_bed() drops when normalizing (design 02 §2).
     using namespace FinGeneratorInternal;
 
     Transform3d to_bed(Eigen::AngleAxisd(PI / 6.0, Vec3d::UnitX())); // 30deg
 
-    FinFeature f_obj = roundtrip_test_fin();
+    FinFeature f_bed = roundtrip_test_fin(); // anchor.z == 0, dir horizontal: valid bed-frame form
 
-    std::optional<FinFeature> f_bed = fin_object_to_bed(f_obj, to_bed);
-    REQUIRE(f_bed.has_value());
+    std::optional<FinFeature> f_obj = fin_bed_to_object(f_bed, to_bed);
+    REQUIRE(f_obj.has_value());
 
-    std::optional<FinFeature> f_obj2 = fin_bed_to_object(*f_bed, to_bed);
-    REQUIRE(f_obj2.has_value());
+    std::optional<FinFeature> f_bed2 = fin_object_to_bed(*f_obj, to_bed);
+    REQUIRE(f_bed2.has_value());
 
-    check_fins_match(f_obj, *f_obj2);
+    check_fins_match(f_bed, *f_bed2);
 }
 
 TEST_CASE("fin_object_to_bed returns nullopt when the object-local u axis becomes vertical", "[fin]")
 {
-    // Instance tipped exactly 90deg about X: object-local +Y (z_angle=0's u axis) maps entirely
-    // onto world Z, so no bed-frame azimuth exists (mirrors the "instance tipped 90deg about X"
-    // generate_fin_meshes test, but exercised directly against the helper it now calls).
+    // Instance tipped exactly 90deg about X: object-local +Y (dir=(0,1,0), the old z_angle=0's u
+    // axis) maps entirely onto world Z, so no bed-frame direction exists (mirrors the "instance
+    // tipped 90deg about X" generate_fin_meshes test, but exercised directly against the helper
+    // it now calls). Design 02 Goal 3: this geometric degeneracy is the only one left -- unlike
+    // the old to_bed-XY-block singularity the regression test below fixes.
     using namespace FinGeneratorInternal;
 
     Transform3d to_bed(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
     FinFeature  f = roundtrip_test_fin();
-    f.z_angle     = 0.0;
+    f.dir         = Vec3d(0.0, 1.0, 0.0);
 
     CHECK_FALSE(fin_object_to_bed(f, to_bed).has_value());
 }
 
-TEST_CASE("fin_bed_to_object returns nullopt when to_bed's XY block is singular", "[fin]")
+TEST_CASE("fin: bed->object->bed roundtrip survives an instance stood on its side", "[fin]")
 {
-    // Same instance tip as above (exactly 90deg about X): the object-local anchor is no longer
-    // recoverable from ANY bed-frame anchor at all -- a_bed's Y component collapses to a
-    // constant (to_bed's own translation.y()) independent of the object-local point, so the 2x2
-    // system fin_bed_to_object() solves is singular regardless of the fin's azimuth. Distinct
-    // from (though, for this particular to_bed, numerically coincident with) the azimuth
-    // degeneracy above: this one is a property of to_bed alone, not of any particular FinFeature.
+    // Design-02 bug: Rx/Ry(90deg) instances made the old 2x2 XY-block solve singular,
+    // so every gizmo commit was silently dropped for objects stood on their end.
+    using namespace FinGeneratorInternal;
+    const Transform3d cases[] = {
+        Transform3d(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX())),
+        Transform3d(Eigen::AngleAxisd(-0.5 * PI, Vec3d::UnitY())),
+        Transform3d(Eigen::Translation3d(3.0, -4.0, 0.0) * Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX())),
+    };
+    for (const Transform3d& to_bed : cases) {
+        FinFeature f_bed;                         // bed-frame: anchor.z == 0, dir horizontal
+        f_bed.anchor = Vec3d(12.5, -7.0, 0.0);
+        f_bed.dir    = dir_from_z_angle(0.6);
+        const std::optional<FinFeature> f_obj = fin_bed_to_object(f_bed, to_bed);
+        REQUIRE(f_obj.has_value());
+        const std::optional<FinFeature> back = fin_object_to_bed(*f_obj, to_bed);
+        REQUIRE(back.has_value());
+        CHECK_THAT(back->anchor.x(), WithinAbs(f_bed.anchor.x(), 1e-9));
+        CHECK_THAT(back->anchor.y(), WithinAbs(f_bed.anchor.y(), 1e-9));
+        CHECK_THAT(back->anchor.z(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT(back->dir.x(), WithinAbs(f_bed.dir.x(), 1e-9));
+        CHECK_THAT(back->dir.y(), WithinAbs(f_bed.dir.y(), 1e-9));
+        CHECK_THAT(back->dir.z(), WithinAbs(0.0, 1e-9));
+    }
+}
+
+TEST_CASE("fin_bed_to_object returns nullopt for a non-invertible instance transform", "[fin]")
+{
+    // Design 02 Goal 3's other honest degeneracy: to_bed's linear part itself is (near) singular
+    // (e.g. a near-zero scale on one axis), independent of any particular FinFeature -- nothing
+    // can be solved, unlike the old to_bed-XY-block singularity above (fixed by the regression
+    // test above; this one is a genuinely non-invertible transform, not just an inconvenient
+    // orientation).
     using namespace FinGeneratorInternal;
 
-    Transform3d to_bed(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
-    FinFeature  f_bed = roundtrip_test_fin();
+    Transform3d to_bed = Geometry::scale_transform(Vec3d(1e-9, 1.0, 1.0));
+    FinFeature  f_bed  = roundtrip_test_fin();
 
     CHECK_FALSE(fin_bed_to_object(f_bed, to_bed).has_value());
 }
@@ -547,8 +687,8 @@ TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));               // center XY on origin, base on bed
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
     // Window semantics (design doc §15): the anchor sits at the cube's own center along u, so the
     // section's surface is at local u = 10 (half-width) and the window's near edge (after the gap)
@@ -565,8 +705,8 @@ TEST_CASE("fin: plane missing the object yields empty mesh", "[fin]")
     its_translate(cube, Vec3f(50.f, 50.f, 0.f)); // far from the plane
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
 
     CHECK(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
 }
@@ -579,8 +719,8 @@ TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
     // Window semantics (design doc §15): with the anchor at the cube's own center (u=0), the
     // section's far-side surface sits at local u = 10 and the window's near edge (past the gap) at
@@ -601,7 +741,7 @@ TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
 
     // flipped: z_angle += PI swaps which side is +u -> mirrored to -Y
     FinFeature g = f;
-    g.z_angle    = PI;
+    g.dir    = FinGeneratorInternal::dir_from_z_angle(PI);
     BoundingBoxf3 bbg = generate_one_fin(cube, g, /*layer_height=*/0.2, /*line_width=*/0.45).bounding_box();
     CHECK(bbg.min.y() < -10.0);
 }
@@ -612,8 +752,8 @@ TEST_CASE("fin: gap offset swallowing the whole rectangle yields empty mesh", "[
     its_translate(cube, Vec3f(-5.f, -5.f, 0.f));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 8.0;
     f.length    = 6.0;
     f.conn_gap  = 100.0; // huge vs. length/section: offset(contour) covers the whole rect
@@ -629,8 +769,8 @@ TEST_CASE("fin: wall has the requested thickness", "[fin]")
     its_translate(cube, Vec3f(-10, -10, 0));
 
     FinFeature f;
-    f.anchor_xy  = Vec2d(0.0, 0.0);
-    f.z_angle    = 0.0;
+    f.anchor     = Vec3d(0.0, 0.0, 0.0);
+    f.dir        = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height     = 15.0;
     // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near edge
     // at u=11 (default conn_gap=1.0) -- length must exceed that or the fin is empty (length=6, the
@@ -648,8 +788,8 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     its_translate(cube, Vec3f(-10, -10, 0));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
     // Window semantics (design doc §15): center anchor -> section's far-side surface at local
     // u=10, window's near edge at u=11 (default conn_gap=1.0). length=16 (> 11) leaves a real
@@ -743,8 +883,8 @@ TEST_CASE("fin: connector count = floor(H/X)+1", "[fin]")
     its_translate(cube, Vec3f(-10, -10, 0));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
     // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near
     // edge at u=11 -- length must exceed that (the pre-§15 value, 6, would leave the fin empty).
@@ -777,8 +917,8 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     its_translate(cube, Vec3f(-10, -10, 0));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     // f.height = 30 asks for a fin taller than the 10mm-tall model. Design doc §15 REVOKES the
     // earlier "H above the model is allowed" rule (§8/§13.3): above the model's own top there is no
     // section, hence no shadow, hence no fin material -- the window's own w-range is capped at
@@ -868,8 +1008,8 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
     };
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = D.z() + 5.0; // taller than the slab's own top -> exercises the model-top cap too
     f.length    = 10.0;        // comfortably beyond any inner(w) reached below -- never the binding edge
     f.thickness = 1.2;
@@ -937,8 +1077,8 @@ TEST_CASE("fin: window fully inside the part -> empty mesh", "[fin]")
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
     f.length    = 5.0; // < surface(10) + gap(1) = 11
     f.conn_gap  = 1.0;
@@ -958,8 +1098,8 @@ TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 20.0); // local u = world Y - 20 -> surface (world Y=10) at local u=-10
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 20.0, 0.0); // local u = world Y - 20 -> surface (world Y=10) at local u=-10
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
     f.length    = 10.0;
     f.thickness = 1.2;
@@ -992,8 +1132,8 @@ TEST_CASE("fin: tab penetration follows max(kTabOverlap, line_width) into the mo
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f)); // surface_u = 10 for every row
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 5.0;
     f.length    = 16.0;   // comfortably beyond inner(w) -- the wall body's own far edge, not the tab's
     f.conn_step = 100.0;  // only the w=0 row -- isolates exactly one tab
@@ -1072,8 +1212,8 @@ TEST_CASE("fin: two disjoint pillars in the section -- shadow/tabs measure the o
     its_merge(solid, far_pillar);
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 10.0;
     f.length    = 16.0; // clears the far lobe's surface (8.5) + gap (1.0) = 9.5, with room to spare
     f.conn_step = 5.0;
@@ -1111,8 +1251,8 @@ TEST_CASE("fin: conn_step smaller than layer_height does not produce overlapping
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f)); // surface_u = 10 for every row, full 20mm height
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 2.0;
     f.length    = 16.0;
     f.conn_step = 0.1; // smaller than layer_height below
@@ -1145,8 +1285,8 @@ TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or n
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
     FinFeature base;
-    base.anchor_xy = Vec2d(0.0, 0.0);
-    base.z_angle   = 0.0;
+    base.anchor    = Vec3d(0.0, 0.0, 0.0);
+    base.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     base.height    = 15.0;
     base.length    = 16.0;
     // thickness/conn_step/conn_gap stay at FinFeature{}'s own (positive) defaults.
@@ -1217,8 +1357,8 @@ namespace {
 FinFeature conversion_test_fin()
 {
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 10.0;
     f.length    = 16.0;
     f.thickness = 1.2;
@@ -1296,7 +1436,7 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
         // the tipped instance the fin stands VERTICAL in the bed frame -- z from 0
         // (the bed) to exactly `height`, not tipped along with the object.
         FinFeature f = conversion_test_fin();
-        f.z_angle    = 0.5 * PI;
+        f.dir    = FinGeneratorInternal::dir_from_z_angle(0.5 * PI);
         o->fins.push_back(f);
 
         std::vector<TriangleMesh> fins =
@@ -1343,8 +1483,8 @@ TEST_CASE("fin: visual STL dump for manual inspection", "[fin-visual][.]")
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));         // center XY on origin, base on bed
 
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     // height=25 (taller than the 10mm default) so the fin reads clearly
     // against the 40mm-tall cube; thickness/conn_step/conn_gap stay at
     // their defaults (1.2, 4, 1).

@@ -42,8 +42,15 @@ namespace FinGeneratorInternal {
 // reuse the same formula instead of hand-mirroring it.
 Transform3d plane_to_bed(const Vec2d& anchor_xy, double z_angle);
 
-// Plane-frame -> bed-frame transform for a fin feature (uses anchor_xy/z_angle only --
-// every other FinFeature field is irrelevant to the plane's own frame).
+// Single home for the (-sin a, cos a) u-axis convention plane_to_bed() pins down:
+// bed-frame azimuth <-> horizontal direction vector.
+Vec3d  dir_from_z_angle(double z_angle);   // (-sin a, cos a, 0)
+double z_angle_from_dir(const Vec3d& dir); // atan2(-dir.x, dir.y); ignores dir.z
+
+// Plane-frame -> bed-frame transform for a fin feature. Valid for a BED-FRAME FinFeature
+// only (anchor.z == 0, dir horizontal) -- exactly the form fin_object_to_bed() produces and
+// generate_one_fin() consumes; every other FinFeature field is irrelevant to the plane's own
+// frame.
 Transform3d plane_to_bed(const FinFeature& f);
 
 // Bed-frame -> plane-frame transform (inverse of plane_to_bed).
@@ -64,24 +71,28 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
 // is generate_one_fin() that skips emitting a tab for it (design doc §13.3).
 int fin_connector_rows(const FinFeature& f, double layer_height);
 
-// Object-local -> bed-frame conversion of `f`'s anchor_xy/z_angle only; every other field
-// passes through unchanged (design doc §13.1-13.2). This is generate_fin_meshes()'s per-fin
-// conversion step, factored out here so it is unit-testable and shared with its inverse below
-// (the gizmo, T00-04-05, uses both directions: this one to display an existing fin, the other
-// to persist an edit). Returns nullopt when `to_bed` degenerates the object-local u axis onto
-// world Z (e.g. the instance is tipped so the fin's plane axis becomes vertical) -- the
-// caller's signal to skip the fin, exactly as generate_fin_meshes() did inline before this
-// helper existed.
+// Object-local -> bed-frame conversion of `f`'s anchor/dir only (design 02: full 3D transform,
+// not just a 2D anchor_xy/z_angle pair); every other field passes through unchanged. This is
+// generate_fin_meshes()'s per-fin conversion step, factored out here so it is unit-testable and
+// shared with its inverse below (the gizmo, T00-04-05, uses both directions: this one to
+// display an existing fin, the other to persist an edit). Returns nullopt when `to_bed`
+// degenerates the object-local dir onto world Z (e.g. the instance is tipped so the fin's plane
+// axis becomes vertical) -- the caller's signal to skip the fin, exactly as generate_fin_meshes()
+// did inline before this helper existed. The only remaining degeneracy (design 02 §3): unlike
+// the old 2x2 XY-block solve, an instance rotated 90deg about X/Y no longer breaks this
+// conversion by itself -- only a fin whose OWN u axis maps vertical does.
 std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed);
 
-// Bed-frame -> object-local conversion of `f_bed`'s anchor_xy/z_angle (inverse of
-// fin_object_to_bed). Both anchor and azimuth invert through the same 2x2 linear system built
-// from `to_bed`'s XY block (see the .cpp for the derivation), so that for any `to_bed` whose XY
-// block is non-singular:
+// Bed-frame -> object-local conversion of `f_bed`'s anchor/dir (inverse of fin_object_to_bed,
+// design 02: full 3D transform). Both anchor and dir invert through the whole of `to_bed` (its
+// full inverse for the point, its linear part's inverse for the direction), so that for any
+// invertible `to_bed`:
 //   fin_object_to_bed(*fin_bed_to_object(f_bed, to_bed), to_bed)
-// reproduces f_bed's anchor_xy/z_angle exactly. Returns nullopt when that XY block is (near)
-// singular -- e.g. the instance is rotated so its local XY plane projects edge-on to the bed --
-// the caller's signal to fall back to defaults.
+// reproduces f_bed's anchor/dir exactly -- including instances rotated ~90deg about X or Y
+// (the design-02 bug: the old 2x2 XY-block solve was singular there, silently dropping every
+// gizmo commit for an object stood on its side). Returns nullopt only when `to_bed`'s linear
+// part is itself non-invertible (near-zero scale) -- the caller's signal to fall back to
+// defaults.
 std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed);
 
 // True when `delta` (a world-frame instance-matrix delta, M_now * M_cached^-1) preserves

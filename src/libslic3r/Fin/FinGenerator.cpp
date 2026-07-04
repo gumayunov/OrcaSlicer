@@ -27,7 +27,14 @@ Transform3d plane_to_bed(const Vec2d& anchor_xy, double z_angle)
     return m;
 }
 
-Transform3d plane_to_bed(const FinFeature& f) { return plane_to_bed(f.anchor_xy, f.z_angle); }
+Vec3d dir_from_z_angle(double z_angle) { return Vec3d(-std::sin(z_angle), std::cos(z_angle), 0.); }
+
+double z_angle_from_dir(const Vec3d& dir) { return std::atan2(-dir.x(), dir.y()); }
+
+Transform3d plane_to_bed(const FinFeature& f)
+{
+    return plane_to_bed(Vec2d(f.anchor.x(), f.anchor.y()), z_angle_from_dir(f.dir));
+}
 
 // plane_to_bed is a rigid transform (orthonormal linear part), so the cheap
 // transpose-based isometry inverse applies.
@@ -59,54 +66,37 @@ int fin_connector_rows(const FinFeature& f, double layer_height)
 
 std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed)
 {
-    // object-local anchor/azimuth -> bed frame (design §13.1-13.2):
-    // anchor: the transformed anchor point, XY only (z dropped, not projected along any
-    // normal -- to_bed already carries the instance's full 3D transform).
-    // azimuth: heading of the transformed u-axis, XY only (z dropped the same way).
-    Vec3d a_bed = to_bed * Vec3d(f.anchor_xy.x(), f.anchor_xy.y(), 0.);
-    Vec3d u_obj(-std::sin(f.z_angle), std::cos(f.z_angle), 0.);
-    Vec3d u_bed = to_bed.linear() * u_obj;
-    u_bed.z()   = 0.;
+    // Full-3D mapping (design 02): anchor through the whole transform with its bed-Z
+    // dropped (the plane's bed anchor lives at z=0 by construction), direction through
+    // the linear part with its vertical component dropped. The only degeneracy left is
+    // geometric: the stored fin's u axis maps (near) vertical, i.e. its plane would lie
+    // horizontally on the bed, which a fin cannot.
+    const Vec3d a_bed = to_bed * f.anchor;
+    Vec3d       u_bed = to_bed.linear() * f.dir;
+    u_bed.z()         = 0.;
     if (u_bed.norm() < EPSILON)
-        return std::nullopt; // degenerate (plane axis became vertical)
+        return std::nullopt;
 
     FinFeature g = f;
-    g.anchor_xy = Vec2d(a_bed.x(), a_bed.y());
-    g.z_angle   = std::atan2(-u_bed.x(), u_bed.y()); // inverse of u = (-sin a, cos a)
+    g.anchor = Vec3d(a_bed.x(), a_bed.y(), 0.0);
+    g.dir    = u_bed.normalized();
     return g;
 }
 
 std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed)
 {
-    // Both anchor and azimuth invert through the upper-left 2x2 block of to_bed's linear part:
-    // fin_object_to_bed() maps an object-local (x, y[, implicit 0]) through to_bed and keeps
-    // only the resulting XY, so inverting it for a *point* means solving
-    //   A * (x, y) = a_bed.xy - translation.xy
-    // and for a *direction* (the azimuth's u-axis, translation-invariant) means solving
-    //   A * (x, y) ~ u_bed.xy  (proportional -- fin_object_to_bed() only reads u_bed's heading)
-    // where A is that same 2x2 block. Guard on its determinant: a singular A means to_bed
-    // squashes the object-local XY plane edge-on to the bed, and neither point can be solved.
-    const Matrix3d linear = to_bed.linear();
-    Matrix2d       A;
-    A << linear(0, 0), linear(0, 1), linear(1, 0), linear(1, 1);
-    const double det = A.determinant();
-    if (std::abs(det) < EPSILON)
-        return std::nullopt; // to_bed's XY block is (near) singular
-
-    const Matrix2d A_inv = A.inverse();
-
-    const Vec2d t_xy = to_bed.translation().head<2>();
-    const Vec2d xy   = A_inv * (f_bed.anchor_xy - t_xy);
-
-    const Vec2d u_bed_xy = Vec2d(-std::sin(f_bed.z_angle), std::cos(f_bed.z_angle));
-    Vec2d       v        = A_inv * u_bed_xy;
-    if (v.norm() < EPSILON)
-        return std::nullopt; // shouldn't happen once A is invertible and u_bed_xy != 0, but stay defensive
-    v.normalize();
+    // Exact inverse of fin_object_to_bed() for any invertible instance transform: the old
+    // 2x2 XY-block solve (singular for objects stood on their side -- the design-02 bug)
+    // is gone; both fields invert through the full 3D transform. NB the object->bed->object
+    // round trip re-anchors the plane at bed z=0 (anchor's own bed-Z is dropped above) --
+    // the plane is identical, the representative point just normalizes; bed->object->bed
+    // IS exact, which is what the gizmo commit/load cycle needs.
+    if (std::abs(to_bed.linear().determinant()) < EPSILON)
+        return std::nullopt; // non-invertible (near-zero scale) -- nothing can be solved
 
     FinFeature g = f_bed;
-    g.anchor_xy = xy;
-    g.z_angle   = std::atan2(-v.x(), v.y()); // inverse of u = (-sin a, cos a), mirrors fin_object_to_bed()
+    g.anchor = to_bed.inverse() * f_bed.anchor;
+    g.dir    = (to_bed.linear().inverse() * f_bed.dir).normalized();
     return g;
 }
 

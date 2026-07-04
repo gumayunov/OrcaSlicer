@@ -337,12 +337,17 @@ struct CutConnector
 using CutConnectors = std::vector<CutConnector>;
 
 // A vertical "fin": a thin breakaway wall hugging the object's cross-section.
-// Parameters are stored in object-local coordinates (anchor XY + azimuth); the
+// Parameters are stored in object-local coordinates (anchor + direction); the
 // actual wall is always vertical in the bed frame and is generated at slice
 // time (see FinGenerator). Only these parameters persist.
 struct FinFeature {
-    Vec2d  anchor_xy {Vec2d::Zero()}; // plane anchor, object-local XY (design called it bed_pos)
-    double z_angle   {0.0};           // azimuth about vertical, object-local (flip = +PI)
+    // Plane anchor and outward (u-axis) direction. OBJECT-LOCAL when stored in
+    // ModelObject::fins; BED-FRAME (anchor.z == 0, dir horizontal) when used as
+    // generate_one_fin() input. Full 3D point + direction so any invertible instance
+    // transform round-trips exactly (design 02: the old 2D anchor_xy/z_angle pair
+    // degenerated when the object stood on its side and silently dropped every edit).
+    Vec3d  anchor {Vec3d::Zero()};
+    Vec3d  dir    {0.0, 1.0, 0.0}; // kept normalized; +Y == old z_angle=0; dir vs -dir = flip side
     double height    {10.0};          // H — rectangle height (mm)
     double length    {8.0};           // L — outward reach (mm)
     double thickness {1.2};           // t — fin wall thickness (mm)
@@ -351,7 +356,7 @@ struct FinFeature {
     bool   enabled   {true};
 
     template<class Archive> void serialize(Archive& ar) {
-        ar(anchor_xy, z_angle, height, length, thickness, conn_step, conn_gap, enabled);
+        ar(anchor, dir, height, length, thickness, conn_step, conn_gap, enabled);
     }
 
     // Exact field-wise comparison (used by model_fins_data_changed() to detect edits between
@@ -359,7 +364,7 @@ struct FinFeature {
     // recomputed via trig round-trips, so exact equality is deterministic here).
     bool operator==(const FinFeature& rhs) const
     {
-        return anchor_xy == rhs.anchor_xy && z_angle == rhs.z_angle && height == rhs.height &&
+        return anchor == rhs.anchor && dir == rhs.dir && height == rhs.height &&
                length == rhs.length && thickness == rhs.thickness && conn_step == rhs.conn_step &&
                conn_gap == rhs.conn_gap && enabled == rhs.enabled;
     }

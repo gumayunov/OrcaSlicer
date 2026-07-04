@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Fin/FinGenerator.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -31,8 +32,8 @@ namespace {
 // object's own XY bounding-box center subtracted (Print.hpp / PrintObject.cpp:98-110). For a
 // single, unrotated instance and a mesh whose own XY bbox is already centered on (0,0), that
 // composition is (to floating-point precision) the identity -- so this mesh's own local
-// coordinates are also the coordinates the slicer slices in, and a FinFeature's anchor_xy /
-// z_angle (object-local, see Model.hpp) can be set directly against the geometry below
+// coordinates are also the coordinates the slicer slices in, and a FinFeature's anchor /
+// dir (object-local, see Model.hpp) can be set directly against the geometry below
 // without having to separately account for instance placement on the bed.
 TriangleMesh tall_thin_box()
 {
@@ -41,17 +42,18 @@ TriangleMesh tall_thin_box()
     return mesh;
 }
 
-// A FinFeature whose plane crosses tall_thin_box(): z_angle = 0 puts the plane's normal along
-// +X (FinGenerator.cpp: plane_to_bed(), z_angle=0 => n = +X world), and anchor_xy = (0,0) puts
-// the plane at world x=0 -- right through the middle of the box (which spans x in [-5,5]).
+// A FinFeature whose plane crosses tall_thin_box(): dir = +Y (the old z_angle = 0) puts the
+// plane's normal along +X (FinGenerator.cpp: plane_to_bed(), z_angle=0 => n = +X world), and
+// anchor = (0,0,0) puts the plane at world x=0 -- right through the middle of the box (which
+// spans x in [-5,5]).
 // height (20) stays inside the box's own Z range (0..40), so adding the fin cannot add new
 // layers, only area within layers that already exist -- required for the "total sliced area"
 // metric below to unambiguously measure the fin's own contribution.
 FinFeature crossing_fin()
 {
     FinFeature f;
-    f.anchor_xy = Vec2d(0.0, 0.0);
-    f.z_angle   = 0.0;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
     // Window semantics (design doc §15): the anchor sits at the box's own center along u, so the
     // section's far-side surface is at local u=5 (half-width) and the window's near edge (past the
@@ -170,7 +172,7 @@ TEST_CASE("fin: disabled/no-intersection slice is identical to no fin", "[fin]")
     SECTION("fin.enabled = true but the plane misses the object")
     {
         FinFeature fin  = crossing_fin();
-        fin.anchor_xy   = Vec2d(1000.0, 1000.0); // far outside the box -> plane never crosses it
+        fin.anchor   = Vec3d(1000.0, 1000.0, 0.0); // far outside the box -> plane never crosses it
         SliceMetrics m  = slice_metrics(&fin);
 
         CHECK(m.layer_count == baseline.layer_count);

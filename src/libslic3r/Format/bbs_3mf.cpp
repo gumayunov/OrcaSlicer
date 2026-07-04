@@ -1,6 +1,7 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "../Model.hpp"
+#include "../Fin/FinGenerator.hpp"
 #include "../Preset.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
@@ -2681,9 +2682,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         continue;
                     pt::ptree fin_tree = fin_node.second;
                     FinFeature f; // defaults kept for any missing attribute
-                    f.anchor_xy = Vec2d(fin_tree.get<double>("<xmlattr>.anchor_x", f.anchor_xy.x()),
-                                         fin_tree.get<double>("<xmlattr>.anchor_y", f.anchor_xy.y()));
-                    f.z_angle   = fin_tree.get<double>("<xmlattr>.z_angle",   f.z_angle);
+                    if (fin_tree.get_optional<double>("<xmlattr>.dir_x").has_value()) {
+                        f.anchor = Vec3d(fin_tree.get<double>("<xmlattr>.anchor_x", f.anchor.x()),
+                                         fin_tree.get<double>("<xmlattr>.anchor_y", f.anchor.y()),
+                                         fin_tree.get<double>("<xmlattr>.anchor_z", f.anchor.z()));
+                        f.dir    = Vec3d(fin_tree.get<double>("<xmlattr>.dir_x", f.dir.x()),
+                                         fin_tree.get<double>("<xmlattr>.dir_y", f.dir.y()),
+                                         fin_tree.get<double>("<xmlattr>.dir_z", f.dir.z()));
+                    } else {
+                        // Legacy (design 00) fin_information.xml: 2D object-local anchor + azimuth about
+                        // the object Z axis -- migrate on the fly (design 02 §3).
+                        f.anchor = Vec3d(fin_tree.get<double>("<xmlattr>.anchor_x", 0.0),
+                                         fin_tree.get<double>("<xmlattr>.anchor_y", 0.0), 0.0);
+                        f.dir    = FinGeneratorInternal::dir_from_z_angle(fin_tree.get<double>("<xmlattr>.z_angle", 0.0));
+                    }
                     f.height    = fin_tree.get<double>("<xmlattr>.height",    f.height);
                     f.length    = fin_tree.get<double>("<xmlattr>.length",    f.length);
                     f.thickness = fin_tree.get<double>("<xmlattr>.thickness", f.thickness);
@@ -7584,10 +7596,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             for (const FinFeature& fin : object->fins) {
                 pt::ptree& fin_tree = obj_tree.add("fin", "");
-                // full double precision so angles/positions survive the roundtrip exactly
-                fin_tree.put("<xmlattr>.anchor_x",  float_to_string_decimal_point(fin.anchor_xy.x(), 9));
-                fin_tree.put("<xmlattr>.anchor_y",  float_to_string_decimal_point(fin.anchor_xy.y(), 9));
-                fin_tree.put("<xmlattr>.z_angle",   float_to_string_decimal_point(fin.z_angle, 9));
+                // full double precision so anchor/direction survive the roundtrip exactly
+                fin_tree.put("<xmlattr>.anchor_x",  float_to_string_decimal_point(fin.anchor.x(), 9));
+                fin_tree.put("<xmlattr>.anchor_y",  float_to_string_decimal_point(fin.anchor.y(), 9));
+                fin_tree.put("<xmlattr>.anchor_z",  float_to_string_decimal_point(fin.anchor.z(), 9));
+                fin_tree.put("<xmlattr>.dir_x",     float_to_string_decimal_point(fin.dir.x(), 9));
+                fin_tree.put("<xmlattr>.dir_y",     float_to_string_decimal_point(fin.dir.y(), 9));
+                fin_tree.put("<xmlattr>.dir_z",     float_to_string_decimal_point(fin.dir.z(), 9));
                 fin_tree.put("<xmlattr>.height",    float_to_string_decimal_point(fin.height, 9));
                 fin_tree.put("<xmlattr>.length",    float_to_string_decimal_point(fin.length, 9));
                 fin_tree.put("<xmlattr>.thickness", float_to_string_decimal_point(fin.thickness, 9));
