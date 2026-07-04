@@ -91,7 +91,8 @@ std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform
 // reproduces f_bed's anchor/dir exactly -- including instances rotated ~90deg about X or Y
 // (the design-02 bug: the old 2x2 XY-block solve was singular there, silently dropping every
 // gizmo commit for an object stood on its side). Returns nullopt only when `to_bed`'s linear
-// part is itself non-invertible (near-zero scale) -- the caller's signal to fall back to
+// part is (near-)non-invertible or vanishingly scaled (the EPSILON determinant cutoff also
+// rejects uniform scales below ~5%, |det| ~ s^3) -- the caller's signal to fall back to
 // defaults.
 std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed);
 

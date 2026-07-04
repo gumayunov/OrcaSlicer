@@ -15,6 +15,7 @@
 
 #include "bbs_3mf.hpp"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <iomanip>
@@ -2702,6 +2703,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     f.conn_step = fin_tree.get<double>("<xmlattr>.conn_step", f.conn_step);
                     f.conn_gap  = fin_tree.get<double>("<xmlattr>.conn_gap",  f.conn_gap);
                     f.enabled   = fin_tree.get<int>("<xmlattr>.enabled", f.enabled ? 1 : 0) != 0;
+                    // Trust boundary: ptree parses "nan"/"inf" without throwing where iostreams
+                    // accept them (libstdc++ does), and Model.hpp promises dir is kept normalized
+                    // -- a hand-edited/corrupt file is the one place both can break. Skip any fin
+                    // violating either, keep the rest.
+                    const bool finite = std::isfinite(f.anchor.x()) && std::isfinite(f.anchor.y()) &&
+                                        std::isfinite(f.anchor.z()) && std::isfinite(f.dir.x()) &&
+                                        std::isfinite(f.dir.y()) && std::isfinite(f.dir.z()) &&
+                                        std::isfinite(f.height) && std::isfinite(f.length) &&
+                                        std::isfinite(f.thickness) && std::isfinite(f.conn_step) &&
+                                        std::isfinite(f.conn_gap);
+                    if (!finite || f.dir.norm() < EPSILON) {
+                        BOOST_LOG_TRIVIAL(warning) << "_BBS_3MF_Importer: skipping fin with non-finite "
+                                                       "or zero-direction parameters in " << FIN_INFORMATION_FILE;
+                        continue;
+                    }
+                    f.dir = f.dir.normalized();
                     fins.push_back(f);
                 }
 
@@ -7596,7 +7613,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             for (const FinFeature& fin : object->fins) {
                 pt::ptree& fin_tree = obj_tree.add("fin", "");
-                // full double precision so anchor/direction survive the roundtrip exactly
+                // 9 significant digits -- plenty for mm-scale geometry; every later comparison
+                // derives from the same stored values
                 fin_tree.put("<xmlattr>.anchor_x",  float_to_string_decimal_point(fin.anchor.x(), 9));
                 fin_tree.put("<xmlattr>.anchor_y",  float_to_string_decimal_point(fin.anchor.y(), 9));
                 fin_tree.put("<xmlattr>.anchor_z",  float_to_string_decimal_point(fin.anchor.z(), 9));

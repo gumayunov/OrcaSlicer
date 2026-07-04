@@ -19,7 +19,7 @@ Transform3d plane_to_bed(const Vec2d& anchor_xy, double z_angle)
 {
     Transform3d m = Transform3d::Identity();
     Matrix3d    R;                                                  // columns: u, w, n
-    R.col(0) = Vec3d(-std::sin(z_angle), std::cos(z_angle), 0.);    // u
+    R.col(0) = dir_from_z_angle(z_angle);                           // u
     R.col(1) = Vec3d(0., 0., 1.);                                   // w (= Z)
     R.col(2) = Vec3d(std::cos(z_angle), std::sin(z_angle), 0.);     // n
     m.linear()      = R;
@@ -92,7 +92,9 @@ std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Trans
     // the plane is identical, the representative point just normalizes; bed->object->bed
     // IS exact, which is what the gizmo commit/load cycle needs.
     if (std::abs(to_bed.linear().determinant()) < EPSILON)
-        return std::nullopt; // non-invertible (near-zero scale) -- nothing can be solved
+        // (near-)non-invertible or vanishingly scaled (|det| ~ s^3 for a uniform scale s, so the
+        // 1e-4 cutoff rejects uniform scales below ~5%) -- nothing meaningful can be solved.
+        return std::nullopt;
 
     FinFeature g = f_bed;
     g.anchor = to_bed.inverse() * f_bed.anchor;
@@ -310,8 +312,9 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     // Clipper, producing wrong-but-non-empty geometry instead of the "no fin" the caller should
     // get; conn_step <= 0 would divide by zero / infinite-loop fin_connector_rows(); thickness <=
     // 0 or conn_gap < 0 make no physical sense either. Bail out before slicing the solid at all.
-    if (fin_bed_frame.length <= 0.0 || fin_bed_frame.height <= 0.0 || fin_bed_frame.thickness <= 0.0 ||
-        fin_bed_frame.conn_gap < 0.0 || fin_bed_frame.conn_step <= 0.0)
+    // Inverted (!(x > 0)) comparisons so NaN also bails out (NaN sails through a plain <= 0).
+    if (!(fin_bed_frame.length > 0.0) || !(fin_bed_frame.height > 0.0) || !(fin_bed_frame.thickness > 0.0) ||
+        !(fin_bed_frame.conn_gap >= 0.0) || !(fin_bed_frame.conn_step > 0.0))
         return TriangleMesh();
 
     // Slice the solid in the fin's plane frame, where the fin plane is Z' = 0

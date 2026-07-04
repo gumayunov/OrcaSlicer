@@ -377,9 +377,11 @@ void GLGizmoFin::update_ghost_preview()
 // --- Persistence (T00-04-05) -------------------------------------------------
 
 // Approximate FinFeature equality for the "did the user actually change anything" check in
-// apply_to_model(): the stored fin round-trips through fin_object_to_bed()/fin_bed_to_object()
-// while the gizmo is open, which is exact only up to floating-point noise -- exact operator==
-// would see phantom diffs and take a spurious undo snapshot on every gizmo close.
+// apply_to_model(). Both operands are BED-FRAME canonical forms (anchor.z == 0, unit
+// horizontal dir): the stored fin's fin_object_to_bed() image vs. the gizmo's own bed-frame
+// state -- comparing raw object-local fields instead would be transform-dependent (see the
+// comment at the call site) and the round trip through the conversions is exact only up to
+// floating-point noise, so exact operator== would see phantom diffs either way.
 static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
 {
     constexpr double eps = 1e-9;
@@ -482,8 +484,21 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
         return;
     }
 
-    if (!mo->fins.empty() && fins_approx_equal(mo->fins.front(), *fin_object))
-        return; // nothing actually changed -- don't pollute the undo stack
+    // No-change check on the BED-FRAME images, not the raw object-local fields: the stored
+    // anchor was normalized to bed z=0 under the instance transform AT STORE TIME, so after
+    // the user lifts/tilts the object a zero-edit open->close would produce object-local
+    // fields differing by the transform delta (re-anchoring makes the raw representation
+    // transform-dependent) -- a raw-field compare would then flag a phantom edit and take a
+    // spurious snapshot + reslice for a geometrically identical fin. Both bed-frame operands
+    // are canonical (anchor.z == 0, unit horizontal dir), so the eps compare is meaningful.
+    // A nullopt projection (stored fin degenerate under the current transform) counts as
+    // "different" and falls through to the write.
+    if (!mo->fins.empty()) {
+        const std::optional<FinFeature> stored_bed =
+            FinGeneratorInternal::fin_object_to_bed(mo->fins.front(), *to_bed);
+        if (stored_bed.has_value() && fins_approx_equal(*stored_bed, fin_world))
+            return; // nothing actually changed -- don't pollute the undo stack
+    }
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), snapshot_name, UndoRedo::SnapshotType::GizmoAction);
     BOOST_LOG_TRIVIAL(debug) << "GLGizmoFin: took undo snapshot '" << snapshot_name << "', persisting fin edit";

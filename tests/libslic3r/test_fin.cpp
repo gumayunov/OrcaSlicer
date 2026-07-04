@@ -134,6 +134,78 @@ bool roundtrip_bbs_3mf(Model& src, Model& dst, const std::string& path)
     return load_ok;
 }
 
+// Saves `m` to a real 3mf, replaces its Metadata/fin_information.xml with `xml` verbatim
+// (copying every other zip entry through untouched), loads the result into `dst` through the
+// full load_bbs_3mf() path, and removes both temp archives. Returns load_bbs_3mf()'s success
+// flag. This is the minimal way to feed hand-crafted fin XML (corrupt, legacy-format,
+// non-finite values) through the REAL load path -- hand-building a whole project archive
+// would just re-test store_bbs_3mf() instead of the tampered-input case.
+bool load_3mf_with_fin_xml(Model& m, Model& dst, const std::string& stem, const std::string& xml)
+{
+    if (temporary_dir().empty())
+        set_temporary_dir(std::filesystem::temp_directory_path().string());
+
+    const std::string good_path = std::string(TEST_DATA_DIR) + "/test_3mf/" + stem + "_source.3mf";
+    const std::string test_path = std::string(TEST_DATA_DIR) + "/test_3mf/" + stem + ".3mf";
+
+    DynamicPrintConfig store_config;
+    StoreParams        store_params;
+    store_params.path     = good_path.c_str();
+    store_params.model    = &m;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    {
+        mz_zip_archive reader{};
+        REQUIRE(open_zip_reader(&reader, good_path));
+        mz_zip_archive writer{};
+        REQUIRE(open_zip_writer(&writer, test_path));
+
+        const mz_uint n_entries = mz_zip_reader_get_num_files(&reader);
+        for (mz_uint i = 0; i < n_entries; ++i) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
+            if (std::string(stat.m_filename) == "Metadata/fin_information.xml") {
+                REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, xml.data(), xml.size(),
+                                               MZ_DEFAULT_COMPRESSION));
+            } else {
+                REQUIRE(mz_zip_writer_add_from_zip_reader(&writer, &reader, i));
+            }
+        }
+        REQUIRE(mz_zip_writer_finalize_archive(&writer));
+        REQUIRE(close_zip_writer(&writer));
+        REQUIRE(close_zip_reader(&reader));
+    }
+    boost::filesystem::remove(good_path);
+
+    DynamicPrintConfig        load_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plate_data_list;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    bool load_ok = load_bbs_3mf(test_path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
+                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
+                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(plate_data_list);
+    boost::filesystem::remove(test_path);
+    return load_ok;
+}
+
+// One-object model (10mm cube, one instance, one default fin) -- the shared fixture for the
+// tampered-fin-XML tests above/below (the stored fin only exists so store_bbs_3mf() emits a
+// fin_information.xml entry for load_3mf_with_fin_xml() to replace).
+Model model_with_default_fin()
+{
+    Model        m;
+    ModelObject* o = m.add_object();
+    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
+    o->add_instance();
+    o->fins.push_back(FinFeature{});
+    return m;
+}
+
 } // namespace
 
 TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
@@ -144,10 +216,12 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     o->add_instance();
 
     // Non-default values on every field, including anchor/dir's Z components and the bool, so
-    // the roundtrip actually exercises all of FinFeature's persisted state.
+    // the roundtrip actually exercises all of FinFeature's persisted state. dirs are unit-norm
+    // (0.6^2+0.64^2+0.48^2 == 1) because the importer re-normalizes at the trust boundary --
+    // a non-unit dir would come back changed by design, not by a roundtrip bug.
     FinFeature f1;
     f1.anchor    = Vec3d(3.25, -1.75, 2.5);
-    f1.dir       = Vec3d(0.6, 0.72, -0.36);
+    f1.dir       = Vec3d(0.6, 0.64, 0.48);
     f1.height    = 17.5;
     f1.length    = 9.25;
     f1.thickness = 1.4;
@@ -238,66 +312,11 @@ TEST_CASE("fin: corrupt fin_information.xml in a 3mf does not abort project load
     // other three sites' systemic risk for upstream (fixing those would change cut/brim
     // behavior, out of this feature's scope). This test pins the graceful-skip behavior
     // end-to-end through the real load_bbs_3mf() entry point.
-    Model        m;
-    ModelObject* o = m.add_object();
-    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
-    o->add_instance();
-    o->fins.push_back(FinFeature{});
-
-    if (temporary_dir().empty())
-        set_temporary_dir(std::filesystem::temp_directory_path().string());
-
-    std::string good_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_corrupt_source.3mf";
-    std::string bad_path  = std::string(TEST_DATA_DIR) + "/test_3mf/fin_corrupt.3mf";
-
-    DynamicPrintConfig store_config;
-    StoreParams        store_params;
-    store_params.path     = good_path.c_str();
-    store_params.model    = &m;
-    store_params.config   = &store_config;
-    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    REQUIRE(store_bbs_3mf(store_params));
-
-    // Copy every zip entry from the known-good archive through verbatim, EXCEPT
-    // fin_information.xml, which is replaced with truncated/unterminated XML -- the minimal way
-    // to reach the real load_bbs_3mf() code path (hand-building a whole project archive would
-    // just re-test store_bbs_3mf() instead of the corrupt-input case).
-    {
-        mz_zip_archive reader{};
-        REQUIRE(open_zip_reader(&reader, good_path));
-        mz_zip_archive writer{};
-        REQUIRE(open_zip_writer(&writer, bad_path));
-
-        const mz_uint n_entries = mz_zip_reader_get_num_files(&reader);
-        for (mz_uint i = 0; i < n_entries; ++i) {
-            mz_zip_archive_file_stat stat;
-            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
-            if (std::string(stat.m_filename) == "Metadata/fin_information.xml") {
-                static const char corrupt[] = "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin ";
-                REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, corrupt, sizeof(corrupt) - 1,
-                                               MZ_DEFAULT_COMPRESSION));
-            } else {
-                REQUIRE(mz_zip_writer_add_from_zip_reader(&writer, &reader, i));
-            }
-        }
-        REQUIRE(mz_zip_writer_finalize_archive(&writer));
-        REQUIRE(close_zip_writer(&writer));
-        REQUIRE(close_zip_reader(&reader));
-    }
-    boost::filesystem::remove(good_path);
-
-    DynamicPrintConfig        load_config;
-    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
-    PlateDataPtrs             plate_data_list;
-    std::vector<Preset*>      project_presets;
-    bool                      is_bbl_3mf = false;
-    Semver                    file_version;
-    Model                     dst;
-    bool load_ok = load_bbs_3mf(bad_path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
-                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
-                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-    release_PlateData_list(plate_data_list);
-    boost::filesystem::remove(bad_path);
+    Model m = model_with_default_fin();
+    Model dst;
+    // Truncated/unterminated XML replaces fin_information.xml inside a real archive.
+    bool load_ok = load_3mf_with_fin_xml(m, dst, "fin_corrupt",
+                                          "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin ");
 
     REQUIRE(load_ok); // must not throw / abort the whole load over one corrupt metadata file
     REQUIRE(dst.objects.size() == 1);
@@ -313,76 +332,19 @@ TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angl
     // dir_x and migrate on the fly: anchor = (anchor_x, anchor_y, 0), dir = dir_from_z_angle(z_angle)
     // -- built the same way the corrupt-xml test above reaches load_bbs_3mf() (hand-replacing just
     // fin_information.xml inside a real archive), so this exercises the real load path end to end.
-    Model        m;
-    ModelObject* o = m.add_object();
-    o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
-    o->add_instance();
-    o->fins.push_back(FinFeature{});
-
-    if (temporary_dir().empty())
-        set_temporary_dir(std::filesystem::temp_directory_path().string());
-
-    std::string good_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_legacy_source.3mf";
-    std::string legacy_path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_legacy.3mf";
-
-    DynamicPrintConfig store_config;
-    StoreParams        store_params;
-    store_params.path     = good_path.c_str();
-    store_params.model    = &m;
-    store_params.config   = &store_config;
-    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    REQUIRE(store_bbs_3mf(store_params));
-
     const double legacy_anchor_x = 5.5, legacy_anchor_y = -2.25, legacy_z_angle = 0.9;
 
-    // Copy every zip entry verbatim except fin_information.xml, replaced with a hand-written
-    // legacy-format document (no dir_x/dir_y/dir_z at all).
-    {
-        mz_zip_archive reader{};
-        REQUIRE(open_zip_reader(&reader, good_path));
-        mz_zip_archive writer{};
-        REQUIRE(open_zip_writer(&writer, legacy_path));
+    std::ostringstream legacy_xml; // hand-written legacy-format document (no dir_x/dir_y/dir_z at all)
+    legacy_xml << "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
+               << "anchor_x=\"" << legacy_anchor_x << "\" "
+               << "anchor_y=\"" << legacy_anchor_y << "\" "
+               << "z_angle=\"" << legacy_z_angle << "\" "
+               << "height=\"10\" length=\"8\" thickness=\"1.2\" conn_step=\"4\" conn_gap=\"1\" "
+               << "enabled=\"1\"/></object></fins>";
 
-        std::ostringstream legacy_xml;
-        legacy_xml << "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
-                   << "anchor_x=\"" << legacy_anchor_x << "\" "
-                   << "anchor_y=\"" << legacy_anchor_y << "\" "
-                   << "z_angle=\"" << legacy_z_angle << "\" "
-                   << "height=\"10\" length=\"8\" thickness=\"1.2\" conn_step=\"4\" conn_gap=\"1\" "
-                   << "enabled=\"1\"/></object></fins>";
-        std::string legacy_str = legacy_xml.str();
-
-        const mz_uint n_entries = mz_zip_reader_get_num_files(&reader);
-        for (mz_uint i = 0; i < n_entries; ++i) {
-            mz_zip_archive_file_stat stat;
-            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
-            if (std::string(stat.m_filename) == "Metadata/fin_information.xml") {
-                REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, legacy_str.data(), legacy_str.size(),
-                                               MZ_DEFAULT_COMPRESSION));
-            } else {
-                REQUIRE(mz_zip_writer_add_from_zip_reader(&writer, &reader, i));
-            }
-        }
-        REQUIRE(mz_zip_writer_finalize_archive(&writer));
-        REQUIRE(close_zip_writer(&writer));
-        REQUIRE(close_zip_reader(&reader));
-    }
-    boost::filesystem::remove(good_path);
-
-    DynamicPrintConfig        load_config;
-    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
-    PlateDataPtrs             plate_data_list;
-    std::vector<Preset*>      project_presets;
-    bool                      is_bbl_3mf = false;
-    Semver                    file_version;
-    Model                     dst;
-    bool load_ok = load_bbs_3mf(legacy_path.c_str(), &load_config, &ctxt, &dst, &plate_data_list, &project_presets,
-                                 &is_bbl_3mf, nullptr, &file_version, nullptr,
-                                 LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-    release_PlateData_list(plate_data_list);
-    boost::filesystem::remove(legacy_path);
-
-    REQUIRE(load_ok);
+    Model m = model_with_default_fin();
+    Model dst;
+    REQUIRE(load_3mf_with_fin_xml(m, dst, "fin_legacy", legacy_xml.str()));
     REQUIRE(dst.objects.size() == 1);
     REQUIRE(dst.objects.front()->fins.size() == 1);
 
@@ -394,6 +356,26 @@ TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angl
     CHECK_THAT(f.dir.x(), WithinAbs(expected_dir.x(), 1e-9));
     CHECK_THAT(f.dir.y(), WithinAbs(expected_dir.y(), 1e-9));
     CHECK_THAT(f.dir.z(), WithinAbs(expected_dir.z(), 1e-9));
+}
+
+TEST_CASE("fin: degenerate (zero) fin direction in fin_information.xml is skipped at load", "[fin]")
+{
+    // Trust boundary (design 02 review): everything downstream assumes finite fields and a
+    // normalized dir; the importer must drop a violating fin (with a warning), not load it.
+    // A zero dir is the trigger that behaves identically on every platform: "nan"/"inf" also
+    // hit the same guard where iostreams accept them (libstdc++), but on libc++/MSVC they fail
+    // ptree's parse outright and never reach the sanitizer, so a NaN fixture would pin
+    // platform-dependent behavior instead of the guard.
+    Model m = model_with_default_fin();
+    Model dst;
+    REQUIRE(load_3mf_with_fin_xml(m, dst, "fin_zero_dir",
+                                   "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
+                                   "anchor_x=\"1\" anchor_y=\"2\" anchor_z=\"0\" "
+                                   "dir_x=\"0\" dir_y=\"0\" dir_z=\"0\" "
+                                   "height=\"10\" length=\"8\" thickness=\"1.2\" "
+                                   "conn_step=\"4\" conn_gap=\"1\" enabled=\"1\"/></object></fins>"));
+    REQUIRE(dst.objects.size() == 1);
+    CHECK(dst.objects.front()->fins.empty()); // the degenerate fin is skipped; the project still loads
 }
 
 // --- FinGenerator: plane-frame <-> bed-frame -------------------------------
