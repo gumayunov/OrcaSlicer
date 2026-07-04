@@ -136,6 +136,15 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
     for (auto& [key, entry] : m_entries)
         entry.visited = false;
 
+    // Early-out for fin-less scenes: skip the per-frame live_trafos build below. Entries
+    // still need the GC (all unvisited by now) -- deleting an object's last fin must drop
+    // its ghost this very frame.
+    if (std::none_of(model.objects.begin(), model.objects.end(),
+                     [](const ModelObject* mo) { return mo != nullptr && !mo->fins.empty(); })) {
+        m_entries.clear();
+        return;
+    }
+
     // Live per-instance world transforms (see the header comment): first GLVolume of an
     // (object, instance) pair wins -- all of an instance's volumes share the instance trafo.
     std::map<std::pair<int, int>, Transform3d> live_trafos;
@@ -273,7 +282,7 @@ std::optional<FinPick> FinGhostsRenderer::pick(const Vec2d& mouse_pos, const Cam
     }
 
     std::optional<FinPick> best;
-    double                 best_dist = std::numeric_limits<double>::max();
+    double                 best_dist_sq = std::numeric_limits<double>::max();
     for (const auto& [key, entry] : m_entries) {
         if (!entry.generated)
             continue;
@@ -290,12 +299,12 @@ std::optional<FinPick> FinGhostsRenderer::pick(const Vec2d& mouse_pos, const Cam
             Vec3f position, normal;
             if (!ghost.raycaster->closest_hit(mouse_pos, entry.last_delta, camera, position, normal))
                 continue;
-            const Vec3d  world = entry.last_delta * position.cast<double>();
-            const double dist  = (world - camera.get_position()).norm();
-            if (dist < best_dist) {
-                best_dist = dist;
-                best      = FinPick{ oi->second, ii->second, ghost.fin_idx,
-                                     ObjectID(key.first), ObjectID(key.second) };
+            const Vec3d  world   = entry.last_delta * position.cast<double>();
+            const double dist_sq = (world - camera.get_position()).squaredNorm();
+            if (dist_sq < best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best         = FinPick{ oi->second, ii->second, ghost.fin_idx,
+                                        ObjectID(key.first), ObjectID(key.second) };
             }
         }
     }

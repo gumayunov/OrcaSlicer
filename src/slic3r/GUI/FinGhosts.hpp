@@ -51,13 +51,14 @@ void render(GLModel& ghost, const Transform3d& model_matrix);
 
 } // namespace FinGhost
 
-// Identifies one fin ghost in the scene: the owning object, optionally a single instance
-// (invalid ObjectID => every instance of the object), and the fin's index within
-// ModelObject::fins. Default-constructed == "none".
+// Identifies one fin ghost in the scene. `object` + `fin_idx` (index into
+// ModelObject::fins) identify the fin; `instance` is matched exactly by the hover
+// path but IGNORED by selected-fin suppression, which is always object-wide (see
+// render()). Default-constructed == "none".
 struct FinGhostRef
 {
     ObjectID object;
-    ObjectID instance;      // invalid => any instance of `object`
+    ObjectID instance;
     int      fin_idx{ -1 };
     bool valid() const { return object.id != 0 && fin_idx >= 0; }
 };
@@ -66,9 +67,9 @@ struct FinGhostRef
 // were resolved from (callers re-validate against the live Model at use time).
 struct FinPick
 {
-    int      object_idx;
-    int      instance_idx;
-    int      fin_idx;
+    int      object_idx{ -1 };
+    int      instance_idx{ -1 };
+    int      fin_idx{ -1 };
     ObjectID object_id;
     ObjectID instance_id;
 };
@@ -95,7 +96,7 @@ public:
     // ref = nothing selected. Pushed by GLCanvas3D::_render_fin_ghosts() every frame.
     void set_selected(const FinGhostRef& selected) { m_selected = selected; }
     // The ghost under the mouse (rendered highlighted); pushed by GLGizmoFin on mouse
-    // moves, cleared by GLCanvas3D whenever the Fin gizmo is not active.
+    // moves (phase 03), cleared by GLCanvas3D whenever the Fin gizmo is not active.
     void set_hovered(const FinGhostRef& hovered) { m_hovered = hovered; }
 
     // Closest ghost under the mouse ray, or nullopt. Skips the selected fin (not drawn =>
