@@ -2702,7 +2702,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     f.thickness = fin_tree.get<double>("<xmlattr>.thickness", f.thickness);
                     f.conn_step = fin_tree.get<double>("<xmlattr>.conn_step", f.conn_step);
                     f.conn_gap  = fin_tree.get<double>("<xmlattr>.conn_gap",  f.conn_gap);
-                    f.enabled   = fin_tree.get<int>("<xmlattr>.enabled", f.enabled ? 1 : 0) != 0;
                     // Trust boundary: ptree parses "nan"/"inf" without throwing where iostreams
                     // accept them (libstdc++ does), and Model.hpp promises dir is kept normalized
                     // -- a hand-edited/corrupt file is the one place both can break. Skip any fin
@@ -7626,7 +7625,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 fin_tree.put("<xmlattr>.thickness", float_to_string_decimal_point(fin.thickness, 9));
                 fin_tree.put("<xmlattr>.conn_step", float_to_string_decimal_point(fin.conn_step, 9));
                 fin_tree.put("<xmlattr>.conn_gap",  float_to_string_decimal_point(fin.conn_gap, 9));
-                fin_tree.put("<xmlattr>.enabled",   fin.enabled ? 1 : 0);
             }
         }
 

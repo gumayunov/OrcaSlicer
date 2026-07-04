@@ -144,7 +144,6 @@ void GLGizmoFin::init_from_selection()
                 m_thickness    = fin_world->thickness;
                 m_conn_step    = fin_world->conn_step;
                 m_conn_gap     = fin_world->conn_gap;
-                m_enabled      = fin_world->enabled;
                 m_ghost_dirty  = true; // T00-04-04: the plane/params above just changed
                 return;
             }
@@ -181,7 +180,6 @@ void GLGizmoFin::reset_to_defaults()
     m_thickness = defaults.thickness;
     m_conn_step = defaults.conn_step;
     m_conn_gap  = defaults.conn_gap;
-    m_enabled   = defaults.enabled;
 
     m_ghost_dirty = true; // T00-04-04: the plane/params above just changed -- the cached ghost mesh is stale
 }
@@ -358,9 +356,7 @@ void GLGizmoFin::update_ghost_preview()
 
     // Verbatim gizmo state -> bed-frame FinFeature (the plane already IS in the bed frame, so,
     // unlike generate_fin_meshes()'s object-local -> bed conversion, no further transform is
-    // needed here). `enabled` is forced true: the preview always shows regardless of the
-    // panel's Enabled toggle -- the toggle only affects what gets persisted/sliced (apply_to_model()
-    // below), not this live preview.
+    // needed here).
     FinFeature fin_bed_frame;
     fin_bed_frame.anchor = Vec3d(m_plane_center.x(), m_plane_center.y(), 0.0);
     fin_bed_frame.dir    = FinGeneratorInternal::dir_from_z_angle(m_z_angle);
@@ -369,7 +365,6 @@ void GLGizmoFin::update_ghost_preview()
     fin_bed_frame.thickness = m_thickness;
     fin_bed_frame.conn_step = m_conn_step;
     fin_bed_frame.conn_gap  = m_conn_gap;
-    fin_bed_frame.enabled   = true;
 
     m_ghost_valid = FinGhost::build_ghost(m_ghost_model, m_object_solid_bed, fin_bed_frame);
 }
@@ -389,8 +384,7 @@ static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
     // deterministic conversion chain and dir stays normalized, so a plain componentwise
     // comparison suffices -- unlike the old z_angle, there is no +/-PI branch cut to fold away,
     // and dir vs -dir are genuinely different sides, not an artifact to treat as equal.
-    return a.enabled == b.enabled
-        && std::abs(a.anchor.x() - b.anchor.x()) < eps
+    return std::abs(a.anchor.x() - b.anchor.x()) < eps
         && std::abs(a.anchor.y() - b.anchor.y()) < eps
         && std::abs(a.anchor.z() - b.anchor.z()) < eps
         && std::abs(a.dir.x() - b.dir.x()) < eps
@@ -451,7 +445,7 @@ std::optional<Transform3d> GLGizmoFin::selected_instance_matrix() const
 // on_set_state() additionally guards the call with !is_serializing() (see its comment).
 //
 // Full persistence contract for the Fin gizmo (T01-00-06): every completed user gesture (drag-end,
-// an ImGui field's IsItemDeactivatedAfterEdit(), the Enabled checkbox, Flip) calls this function
+// an ImGui field's IsItemDeactivatedAfterEdit(), Flip) calls this function
 // directly. On top of that, closing the gizmo (toolbar re-click, Esc, switching to another gizmo)
 // also calls this function once from on_set_state()'s Off branch, committing whatever the panel/ghost
 // was showing at close time (WYSIWYG) -- including untouched defaults on a freshly opened gizmo and a
@@ -475,7 +469,6 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     fin_world.thickness = m_thickness;
     fin_world.conn_step = m_conn_step;
     fin_world.conn_gap  = m_conn_gap;
-    fin_world.enabled   = m_enabled;
 
     const std::optional<FinFeature> fin_object = FinGeneratorInternal::fin_bed_to_object(fin_world, *to_bed);
     if (!fin_object.has_value()) {
@@ -511,9 +504,8 @@ void GLGizmoFin::apply_to_model(const std::string& snapshot_name)
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
-// "Remove fin" button (T00-04-05): clears the object's fins outright -- unlike the Enabled
-// checkbox (which persists enabled=false and leaves the stored fin otherwise intact, see
-// on_render_input_window()), this is how the user actually gets rid of one. No-op when the
+// "Remove fin" button (T00-04-05): clears the object's fins outright -- the ONLY way to
+// delete a stored fin. No-op when the
 // object has no fin to remove (nothing to snapshot). Also suppresses the WYSIWYG close-commit
 // (m_apply_on_close, T01-00-06): the panel still holds the removed fin's parameters and the ghost
 // stays visible, so without this, closing the gizmo right after Remove would immediately
@@ -837,8 +829,7 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
 
     // T00-04-04: any edit below that feeds generate_one_fin() invalidates the cached ghost
     // preview; collected into one flag and applied once at the end rather than at each call
-    // site. (m_enabled is deliberately NOT included: the preview always uses enabled=true,
-    // see update_ghost_preview(), so toggling it alone never changes the generated mesh.)
+    // site.
     bool params_changed = false;
     // T00-04-05: a field was "committed" (lost focus after being edited, or a single-shot button
     // like Flip was pressed) this frame -- persist once at the end of this function, one snapshot
@@ -885,13 +876,7 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     if (m_imgui->button(_L("Reset")))
         reset_to_defaults(); // sets m_ghost_dirty itself; does NOT touch ModelObject::fins (see its doc comment)
 
-    ImGui::SameLine();
-    if (m_imgui->bbl_checkbox(_L("Enabled"), m_enabled))
-        // A checkbox toggle is its own atomic gesture (there is nothing to "commit" later) --
-        // persist immediately with its own snapshot, same as Flip/Remove fin below.
-        apply_to_model(_u8L("Toggle fin"));
-
-    // On its own row, separated from Reset/Enabled: unlike them, this is destructive (clears
+    // On its own row, separated from Reset: unlike it, this is destructive (clears
     // ModelObject::fins outright, see remove_fin_from_model()'s doc comment).
     if (m_imgui->button(_L("Remove fin")))
         remove_fin_from_model();

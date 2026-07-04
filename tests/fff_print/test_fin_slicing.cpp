@@ -12,8 +12,8 @@
 // T00-02-01 (design 00, phase 02): failing fff_print integration tests for slice-time fin
 // injection. No injection code exists yet -- that's the next task (T00-02-02), which will
 // inject transient fin volumes at the top of PrintObject::slice_volumes(). These tests are
-// the TDD red for that task: "enabled fin adds geometry" is expected to FAIL right now
-// (nothing adds the fin's geometry to the sliced object yet); "disabled/no-intersection is
+// the TDD red for that task: "fin adds geometry" is expected to FAIL right now
+// (nothing adds the fin's geometry to the sliced object yet); "no-intersection is
 // identical to no fin" is expected to pass trivially (there is no code path that could change
 // the output either way).
 
@@ -65,19 +65,18 @@ FinFeature crossing_fin()
     f.thickness = 1.2;
     f.conn_step = 4.0;
     f.conn_gap  = 1.0;
-    f.enabled   = true;
     return f;
 }
 
 struct SliceMetrics
 {
     // Sum of ExPolygon::area() over every layer's lslices for the (single) sliced object.
-    // Chosen as the one robust metric for both tests in this file: an intersecting, enabled
+    // Chosen as the one robust metric for both tests in this file: an intersecting
     // fin can only add solid cross-section somewhere in [0, fin.height], so it must strictly
-    // increase this sum; a disabled or non-intersecting fin contributes no geometry anywhere,
+    // increase this sum; a non-intersecting fin contributes no geometry anywhere,
     // so this sum -- and the layer count -- must come out exactly as if there were no fin at
     // all. This area-equality check is the phase's practical stand-in for "no injection when
-    // disabled/non-intersecting"; full byte-identical G-code comparison is unnecessary here
+    // non-intersecting"; full byte-identical G-code comparison is unnecessary here
     // because that code path is a no-op (nothing is added to the model) rather than something
     // that could plausibly produce identical-looking-but-different output.
     double area        = 0.0;
@@ -142,7 +141,7 @@ SliceMetrics slice_metrics(const FinFeature *fin)
 
 } // namespace
 
-TEST_CASE("fin: enabled fin adds geometry to the sliced object", "[fin]")
+TEST_CASE("fin: fin adds geometry to the sliced object", "[fin]")
 {
     SliceMetrics baseline = slice_metrics(nullptr);
 
@@ -155,21 +154,11 @@ TEST_CASE("fin: enabled fin adds geometry to the sliced object", "[fin]")
     CHECK(with_fin.area > baseline.area);
 }
 
-TEST_CASE("fin: disabled/no-intersection slice is identical to no fin", "[fin]")
+TEST_CASE("fin: no-intersection slice is identical to no fin", "[fin]")
 {
     SliceMetrics baseline = slice_metrics(nullptr);
 
-    SECTION("fin.enabled = false")
-    {
-        FinFeature fin = crossing_fin();
-        fin.enabled    = false;
-        SliceMetrics m = slice_metrics(&fin);
-
-        CHECK(m.layer_count == baseline.layer_count);
-        CHECK_THAT(m.area, WithinAbs(baseline.area, 1e-6));
-    }
-
-    SECTION("fin.enabled = true but the plane misses the object")
+    SECTION("the plane misses the object")
     {
         FinFeature fin  = crossing_fin();
         fin.anchor   = Vec3d(1000.0, 1000.0, 0.0); // far outside the box -> plane never crosses it

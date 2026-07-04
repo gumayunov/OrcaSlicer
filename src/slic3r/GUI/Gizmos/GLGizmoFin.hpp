@@ -55,7 +55,6 @@ class GLGizmoFin : public GLGizmoBase
     double m_thickness{ 1.2 };  // t: fin wall thickness
     double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
     double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
-    bool   m_enabled{ true };   // toggled by the panel checkbox; semantics land in T00-04-05
 
     // WYSIWYG close-commit (T01-00-06): suppresses the close-time apply_to_model() call
     // (on_set_state()'s Off branch) right after "Remove fin" -- without it, closing the gizmo

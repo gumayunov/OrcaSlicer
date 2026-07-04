@@ -1170,10 +1170,10 @@ void PrintObject::slice_volumes()
 
         explicit TransientFinGuard(PrintObject& po) : mo(po.model_object())
         {
-            // Cheap early-out: an object with no enabled fins must do nothing at all --
+            // Cheap early-out: an object with no fins must do nothing at all --
             // no host-volume lookup, no Flow/width resolution, no mesh copy/merge -- so
             // this is a true no-op for the (overwhelmingly common) no-fin case.
-            if (std::none_of(mo->fins.begin(), mo->fins.end(), [](const FinFeature& f) { return f.enabled; }))
+            if (mo->fins.empty())
                 return;
 
             // Fins need an existing MODEL_PART volume to merge into and to attach to

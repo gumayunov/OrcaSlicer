@@ -45,7 +45,7 @@ void render(GLModel& ghost, const Transform3d& model_matrix);
 } // namespace FinGhost
 
 // Always-visible scene ghosts (design 01): one translucent fin preview per
-// (object-with-enabled-fins x instance), rendered by GLCanvas3D without the Fin gizmo.
+// (object-with-fins x instance), rendered by GLCanvas3D without the Fin gizmo.
 // Cached ghost meshes follow the object rigidly while the instance delta keeps the
 // bed-frame silhouette (XY move / Z spin -- FinGeneratorInternal::is_bed_rigid_delta());
 // any other change regenerates, throttled to RegenInterval while a transform is in flux.
@@ -87,7 +87,7 @@ private:
         Transform3d            to_bed{ Transform3d::Identity() };   // instance matrix at generation time
         double                 layer_height{ 0.0 };                 // preset-derived generate_one_fin() inputs
         double                 line_width{ 0.0 };                   //   baked into the ghosts
-        std::vector<std::unique_ptr<GLModel>> ghosts;               // one per enabled fin that produced geometry
+        std::vector<std::unique_ptr<GLModel>> ghosts;               // one per fin that produced geometry
         std::chrono::steady_clock::time_point last_regen{};         // epoch => "never" => first regen is immediate
         bool generated{ false };                                    // false until the first regeneration ran
         bool visited{ false };                                      // per-frame GC mark

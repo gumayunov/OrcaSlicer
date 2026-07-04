@@ -139,8 +139,7 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
         const ModelObject* mo = model.objects[object_idx];
         if (mo == nullptr || mo->id() == skip_object)
             continue;
-        if (std::none_of(mo->fins.begin(), mo->fins.end(),
-                         [](const FinFeature& f) { return f.enabled; }))
+        if (mo->fins.empty())
             continue;
 
         // Preset-derived inputs are baked into every ghost mesh: a print/printer preset
@@ -214,7 +213,7 @@ void FinGhostsRenderer::regenerate(Entry& entry, const ModelObject& object, cons
     entry.to_bed    = to_bed;
     entry.generated = true;
 
-    // Same pipeline as slicing/the gizmo: merged bed-frame solid -> per enabled fin,
+    // Same pipeline as slicing/the gizmo: merged bed-frame solid -> per fin,
     // object-local params -> bed frame -> mesh. Degenerate instance transforms
     // (fin_object_to_bed() -> nullopt) and misses (empty mesh) are skipped -- no ghost
     // is the honest "nothing will print here" signal, matching slice-time behavior.
@@ -222,8 +221,6 @@ void FinGhostsRenderer::regenerate(Entry& entry, const ModelObject& object, cons
     if (solid.indices.empty())
         return;
     for (const FinFeature& fin : object.fins) {
-        if (!fin.enabled)
-            continue;
         const std::optional<FinFeature> fin_bed = FinGeneratorInternal::fin_object_to_bed(fin, to_bed);
         if (!fin_bed.has_value())
             continue;

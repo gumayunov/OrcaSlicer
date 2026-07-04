@@ -20,10 +20,10 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
                                double                       layer_height,
                                double                       line_width);
 
-// Build meshes for all of `o`'s enabled fins. `to_bed` is the transform mapping
+// Build meshes for all of `o`'s fins. `to_bed` is the transform mapping
 // `o`'s object-local coordinates to the bed frame (z=0 = bed) -- e.g. a PrintObject's
 // trafo_centered(). The returned meshes are themselves already in that BED frame.
-// Disabled fins and fins whose plane misses the object's solid (empty result) are
+// Fins whose plane misses the object's solid (empty result) are
 // skipped, so the returned vector may be shorter than o.fins or empty.
 std::vector<TriangleMesh> generate_fin_meshes(const ModelObject& o, const Transform3d& to_bed,
                                                double              layer_height,

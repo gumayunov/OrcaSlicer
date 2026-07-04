@@ -457,18 +457,15 @@ std::vector<TriangleMesh> generate_fin_meshes(const ModelObject& o, const Transf
 
     std::vector<TriangleMesh> out;
 
-    // Cheap early-out: an object with no enabled fins must do no work at all (no solid
-    // assembly below) -- callers rely on this to make the disabled/no-fin path a true
+    // Cheap early-out: an object with no fins must do no work at all (no solid
+    // assembly below) -- callers rely on this to make the no-fin path a true
     // no-op (see TransientFinGuard in PrintObjectSlice.cpp).
-    if (std::none_of(o.fins.begin(), o.fins.end(), [](const FinFeature& f) { return f.enabled; }))
+    if (o.fins.empty())
         return out;
 
     indexed_triangle_set solid = object_solid_bed(o, to_bed);
 
     for (const FinFeature& f : o.fins) {
-        if (!f.enabled)
-            continue;
-
         std::optional<FinFeature> g = fin_object_to_bed(f, to_bed);
         if (!g)
             continue; // degenerate (plane axis became vertical) -> skip fin

@@ -353,10 +353,9 @@ struct FinFeature {
     double thickness {1.2};           // t — fin wall thickness (mm)
     double conn_step {4.0};           // X — vertical spacing of connectors (mm)
     double conn_gap  {1.0};           // gap == connector length == contour-follow distance (mm)
-    bool   enabled   {true};
 
     template<class Archive> void serialize(Archive& ar) {
-        ar(anchor, dir, height, length, thickness, conn_step, conn_gap, enabled);
+        ar(anchor, dir, height, length, thickness, conn_step, conn_gap);
     }
 
     // Exact field-wise comparison (used by model_fins_data_changed() to detect edits between
@@ -366,7 +365,7 @@ struct FinFeature {
     {
         return anchor == rhs.anchor && dir == rhs.dir && height == rhs.height &&
                length == rhs.length && thickness == rhs.thickness && conn_step == rhs.conn_step &&
-               conn_gap == rhs.conn_gap && enabled == rhs.enabled;
+               conn_gap == rhs.conn_gap;
     }
     bool operator!=(const FinFeature& rhs) const { return !(*this == rhs); }
 };

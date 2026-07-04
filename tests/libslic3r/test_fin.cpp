@@ -26,7 +26,6 @@ using Catch::Matchers::WithinAbs;
 TEST_CASE("FinFeature defaults are sane", "[fin]")
 {
     FinFeature f;
-    CHECK(f.enabled);
     CHECK_THAT(f.conn_gap, WithinAbs(1.0, 1e-9)); // gap == connector length ~1mm
     CHECK(f.thickness > 0.0);
 }
@@ -68,7 +67,6 @@ TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
     src.thickness = 0.9;
     src.conn_step = 3.0;
     src.conn_gap  = 1.25;
-    src.enabled   = false;
 
     std::stringstream ss;
     {
@@ -93,7 +91,6 @@ TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
     CHECK_THAT(dst.thickness, WithinAbs(0.9, 1e-9));
     CHECK_THAT(dst.conn_step, WithinAbs(3.0, 1e-9));
     CHECK_THAT(dst.conn_gap, WithinAbs(1.25, 1e-9));
-    CHECK_FALSE(dst.enabled);
 }
 
 // --- FinFeature: .3mf persistence (T00-03-01) -------------------------------
@@ -215,7 +212,7 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     o->add_volume(TriangleMesh(its_make_cube(10, 10, 10)));
     o->add_instance();
 
-    // Non-default values on every field, including anchor/dir's Z components and the bool, so
+    // Non-default values on every field, including anchor/dir's Z components, so
     // the roundtrip actually exercises all of FinFeature's persisted state. dirs are unit-norm
     // (0.6^2+0.64^2+0.48^2 == 1) because the importer re-normalizes at the trust boundary --
     // a non-unit dir would come back changed by design, not by a roundtrip bug.
@@ -227,7 +224,6 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     f1.thickness = 1.4;
     f1.conn_step = 5.5;
     f1.conn_gap  = 0.9;
-    f1.enabled   = true;
     o->fins.push_back(f1);
 
     FinFeature f2;
@@ -238,7 +234,6 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     f2.thickness = 0.8;
     f2.conn_step = 2.5;
     f2.conn_gap  = 1.75;
-    f2.enabled   = false;
     o->fins.push_back(f2);
 
     std::string path = std::string(TEST_DATA_DIR) + "/test_3mf/fin_roundtrip.3mf";
@@ -263,7 +258,6 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     CHECK_THAT(r1.thickness,     WithinAbs(f1.thickness, 1e-6));
     CHECK_THAT(r1.conn_step,     WithinAbs(f1.conn_step, 1e-6));
     CHECK_THAT(r1.conn_gap,      WithinAbs(f1.conn_gap, 1e-6));
-    CHECK(r1.enabled == f1.enabled);
 
     const FinFeature& r2 = dst.objects.front()->fins[1];
     CHECK_THAT(r2.anchor.x(),    WithinAbs(f2.anchor.x(), 1e-6));
@@ -277,7 +271,6 @@ TEST_CASE("fin: survives 3mf save/load roundtrip", "[fin]")
     CHECK_THAT(r2.thickness,     WithinAbs(f2.thickness, 1e-6));
     CHECK_THAT(r2.conn_step,     WithinAbs(f2.conn_step, 1e-6));
     CHECK_THAT(r2.conn_gap,      WithinAbs(f2.conn_gap, 1e-6));
-    CHECK(r2.enabled == f2.enabled);
 }
 
 TEST_CASE("fin: loading a 3mf without fins is fine", "[fin]")
@@ -334,6 +327,8 @@ TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angl
     // fin_information.xml inside a real archive), so this exercises the real load path end to end.
     const double legacy_anchor_x = 5.5, legacy_anchor_y = -2.25, legacy_z_angle = 0.9;
 
+    // The enabled="..." attribute is legacy (design 03 removed the mechanism); fixtures keep
+    // it to pin that the importer silently ignores it.
     std::ostringstream legacy_xml; // hand-written legacy-format document (no dir_x/dir_y/dir_z at all)
     legacy_xml << "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
                << "anchor_x=\"" << legacy_anchor_x << "\" "
@@ -469,8 +464,8 @@ TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
 
 namespace {
 
-// Arbitrary, mutually distinct values for every field (incl. enabled=false, the non-default
-// bool) so a field-dropping bug can't hide behind a default-initialized match.
+// Arbitrary, mutually distinct values for every field so a field-dropping bug can't hide
+// behind a default-initialized match.
 FinFeature roundtrip_test_fin()
 {
     FinFeature f;
@@ -481,7 +476,6 @@ FinFeature roundtrip_test_fin()
     f.thickness = 0.85;
     f.conn_step = 3.5;
     f.conn_gap  = 1.35;
-    f.enabled   = false;
     return f;
 }
 
@@ -498,7 +492,6 @@ void check_fins_match(const FinFeature& a, const FinFeature& b, double eps = 1e-
     CHECK_THAT(a.thickness, WithinAbs(b.thickness, eps));
     CHECK_THAT(a.conn_step, WithinAbs(b.conn_step, eps));
     CHECK_THAT(a.conn_gap, WithinAbs(b.conn_gap, eps));
-    CHECK(a.enabled == b.enabled);
 }
 
 } // namespace
