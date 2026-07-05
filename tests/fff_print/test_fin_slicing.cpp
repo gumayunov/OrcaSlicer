@@ -83,6 +83,21 @@ struct SliceMetrics
     size_t layer_count = 0;
 };
 
+// Sums SliceMetrics off an already-processed Print (single object expected). Factored out of
+// slice_metrics() so the re-apply test below can measure the SAME Print instance twice.
+SliceMetrics metrics_from(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &po = *print.objects().front();
+
+    SliceMetrics m;
+    m.layer_count = po.layers().size();
+    for (const Layer *layer : po.layers())
+        for (const ExPolygon &ex : layer->lslices)
+            m.area += ex.area();
+    return m;
+}
+
 // Builds a single-object Print around tall_thin_box(), slices it, and reports SliceMetrics.
 // Every FinFeature in `fins` is pushed onto the ModelObject's fins BEFORE Print::apply(), i.e.
 // exactly as if GUI-driven fins were already present on the model when slicing starts.
@@ -128,15 +143,7 @@ SliceMetrics slice_metrics(const std::vector<FinFeature> &fins)
     print.set_status_silent();
     print.process();
 
-    REQUIRE(print.objects().size() == 1);
-    const PrintObject &po = *print.objects().front();
-
-    SliceMetrics m;
-    m.layer_count = po.layers().size();
-    for (const Layer *layer : po.layers())
-        for (const ExPolygon &ex : layer->lslices)
-            m.area += ex.area();
-    return m;
+    return metrics_from(print);
 }
 
 // Old single-fin entry point, kept for the pre-design-03 tests below: null means "no fin at
@@ -197,4 +204,58 @@ TEST_CASE("fin: no-intersection slice is identical to no fin", "[fin]")
         CHECK(m.layer_count == baseline.layer_count);
         CHECK_THAT(m.area, WithinAbs(baseline.area, 1e-6));
     }
+}
+
+TEST_CASE("fin: editing a fin re-slices the existing print", "[fin]")
+{
+    // Regression test for the incremental-apply path: every other test in this file builds a
+    // FRESH Print per slice (see slice_metrics()), which is exactly why this bug escaped them.
+    // In the GUI the SAME Print instance is re-applied after a fin edit; Print::apply()'s
+    // fins_differ branch must invalidate the objects' own posSlice step, or process() reuses
+    // the cached layers with the STALE fin baked in.
+    SliceMetrics baseline = slice_metrics(nullptr); // fresh slice, no fin at all
+
+    // Same setup as slice_metrics(), but Model/Print are kept alive across a second apply().
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               2 },
+        { "initial_layer_print_height", 2 },
+        { "nozzle_diameter",            3 }, // must be >= layer_height, see test_printobject.cpp
+        { "sparse_infill_density",      0 },
+    });
+
+    Slic3r::Model model;
+    Slic3r::Print print;
+
+    ModelObject *object = model.add_object();
+    object->name += "fin_box.stl";
+    object->add_volume(tall_thin_box(), /*modify_to_center_geometry=*/false);
+    ModelInstance *instance = object->add_instance();
+    instance->set_offset(Vec3d(100.0, 100.0, 0.0)); // well inside the 200x200 default bed
+    object->ensure_on_bed();
+    object->fins.push_back(crossing_fin());
+
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate(); // return value intentionally ignored, see slice_metrics()
+    print.set_status_silent();
+    print.process();
+
+    SliceMetrics with_fin = metrics_from(print);
+    // Sanity: the crossing fin really contributed geometry to the first slice.
+    CHECK(with_fin.layer_count == baseline.layer_count);
+    REQUIRE(with_fin.area > baseline.area);
+
+    // "Edit" the fin exactly as the GUI does: mutate the model, then re-apply to the SAME
+    // Print. The new anchor puts the fin's plane far outside the box, so the fin no longer
+    // intersects and must contribute nothing to the re-slice.
+    model.objects.front()->fins.front().anchor = Vec3d(1000.0, 1000.0, 0.0);
+    print.apply(model, config);
+    print.process();
+
+    SliceMetrics after_move = metrics_from(print);
+    CHECK(after_move.layer_count == baseline.layer_count);
+    // With the bug present this fails: posSlice stays done, the cached layers keep the old
+    // fin's cross-section, and after_move.area sticks at with_fin.area.
+    CHECK_THAT(after_move.area, WithinAbs(baseline.area, 1e-6));
 }

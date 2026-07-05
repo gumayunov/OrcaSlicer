@@ -1471,12 +1471,14 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             }
             if (fins_differ) {
                 // Fins are generated straight into the sliced mesh at posSlice (see
-                // TransientFinGuard in PrintObjectSlice.cpp) -- there is no dedicated fin
-                // pipeline step to invalidate individually, so mirror brim_points_differ above
-                // and invalidate everything. No-op (this branch never runs) when fins didn't
-                // change, so unrelated edits keep their existing, narrower invalidation.
+                // TransientFinGuard in PrintObjectSlice.cpp), so the object's own slicing
+                // step must be invalidated. Print-level invalidate_all_steps() alone is NOT
+                // enough: it leaves posSlice done and G-code re-exports from layers with
+                // the stale fin baked in. invalidate_step(posSlice) cascades to every
+                // dependent object step and to psSkirtBrim/psWipeTower/psGCodeExport.
                 model_object.fins = model_object_new.fins;
-                update_apply_status(this->invalidate_all_steps());
+                for (const PrintObjectStatus &print_object_status : print_objects_range)
+                    update_apply_status(print_object_status.print_object->invalidate_step(posSlice));
             }
         }
         if (! solid_or_modifier_differ) {
