@@ -1244,6 +1244,96 @@ TEST_CASE("fin: conn_step smaller than layer_height does not produce overlapping
     CHECK(m.stats().number_of_parts == 1 + 11);
 }
 
+// --- FinGenerator: components detached from the bed (design 04) ------------
+
+TEST_CASE("fin: shelf overhanging the whole window -- the fin piece above it is dropped", "[fin]")
+{
+    // Г-shaped part: a pillar (world Y in [-2,2], Z in [0,20]) with a shelf at Z in [8,10]
+    // jutting out to Y=12, PAST the window's far edge (length=10). At shelf height the gap
+    // carve (offset_sec) consumes the window's entire remaining width, so the fin material
+    // filled down from above the shelf has no path to the bed -- design 04 drops it instead
+    // of printing it in the air.
+    indexed_triangle_set pillar = its_make_cube(4, 4, 20);
+    its_translate(pillar, Vec3f(-2.f, -2.f, 0.f));
+    indexed_triangle_set shelf = its_make_cube(4, 14, 2); // world Y in [-2,12], overlaps the pillar
+    its_translate(shelf, Vec3f(-2.f, -2.f, 8.f));
+
+    indexed_triangle_set solid = pillar;
+    its_merge(solid, shelf);
+
+    FinFeature f;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
+    f.height    = 20.0;
+    f.length    = 10.0; // shelf reaches u=12 > length: nothing above it can reach the bed
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    double layer_height = 0.2, line_width = 0.45;
+    TriangleMesh m = generate_one_fin(solid, f, layer_height, line_width);
+    REQUIRE_FALSE(m.empty());
+    CHECK(m.stats().open_edges == 0);
+
+    // Only the bed-standing piece survives; it tops out at the shelf's gap clearance
+    // (shelf bottom 8 - conn_gap 1 = 7), nowhere near the model top (20).
+    CHECK_THAT(m.bounding_box().max.z(), WithinAbs(7.0, 1e-2));
+    // Wall + tabs at w=0 and w=5 only: rows 10/15/20 have no fin material left after the
+    // detached piece is dropped, so their tabs disappear with it (checked against fin2d).
+    CHECK(m.stats().number_of_parts == 1 + 2);
+}
+
+TEST_CASE("fin: shelf narrower than the window -- fin stays connected around it, nothing dropped", "[fin]")
+{
+    // Same Г shape, but the shelf stops at Y=6: past its far edge (6 + conn_gap = 7) the
+    // window still has columns (u in [7,10]) running unbroken from bed to top, so the region
+    // above the shelf stays connected to the bed around it -- one component, full height.
+    indexed_triangle_set pillar = its_make_cube(4, 4, 20);
+    its_translate(pillar, Vec3f(-2.f, -2.f, 0.f));
+    indexed_triangle_set shelf = its_make_cube(4, 8, 2); // world Y in [-2,6]
+    its_translate(shelf, Vec3f(-2.f, -2.f, 8.f));
+
+    indexed_triangle_set solid = pillar;
+    its_merge(solid, shelf);
+
+    FinFeature f;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
+    f.height    = 20.0;
+    f.length    = 10.0;
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    TriangleMesh m = generate_one_fin(solid, f, /*layer_height=*/0.2, /*line_width=*/0.45);
+    REQUIRE_FALSE(m.empty());
+    CHECK(m.stats().open_edges == 0);
+    CHECK_THAT(m.bounding_box().max.z(), WithinAbs(20.0, 0.5)); // reaches the model top
+}
+
+TEST_CASE("fin: every component detached from the bed -> empty mesh", "[fin]")
+{
+    // The shelf sits ON the bed (Z in [0,2]) and juts past the window's far edge: the gap
+    // carve consumes the window's whole width right at the bed, so ALL remaining fin
+    // material (above the shelf) is airborne -- design 04 drops everything, empty mesh
+    // (same "no fin body" contract as a plane that misses the part).
+    indexed_triangle_set pillar = its_make_cube(4, 4, 20);
+    its_translate(pillar, Vec3f(-2.f, -2.f, 0.f));
+    indexed_triangle_set shelf = its_make_cube(4, 14, 2); // world Y in [-2,12], Z in [0,2]
+    its_translate(shelf, Vec3f(-2.f, -2.f, 0.f));
+
+    indexed_triangle_set solid = pillar;
+    its_merge(solid, shelf);
+
+    FinFeature f;
+    f.anchor    = Vec3d(0.0, 0.0, 0.0);
+    f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
+    f.height    = 20.0;
+    f.length    = 10.0;
+    f.conn_step = 5.0;
+    f.conn_gap  = 1.0;
+
+    CHECK(generate_one_fin(solid, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
+}
+
 // --- FinGenerator: negative/zero parameters (T00-01-03 review note) --------
 
 TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or negative conn_gap "

@@ -374,6 +374,20 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (fin2d.empty())
         return TriangleMesh(); // gap re-carve consumed everything the fill-down step produced
 
+    // Drop components not standing on the bed (design 04): the gap re-carve above can cut the
+    // filled-down column -- a part region overhanging the window's entire remaining width leaves
+    // the fin material above it with no path to the bed. Such a piece would print in the air and
+    // serve no support purpose (tabs are breakaway connectors, not load-bearing anchors), so it
+    // is dropped. Each ExPolygon of fin2d is one connected component of the 2D region, and the
+    // solid is its straight prism, so 2D bed contact (min w at 0, exact after the window clip)
+    // decides 3D bed contact too. Must run BEFORE the tab loop below: tabs test material presence
+    // against fin2d, so tabs of a dropped piece vanish with it.
+    fin2d.erase(std::remove_if(fin2d.begin(), fin2d.end(),
+                               [](const ExPolygon& ex) { return get_extents(ex).min.y() > SCALED_EPSILON; }),
+                fin2d.end());
+    if (fin2d.empty())
+        return TriangleMesh(); // every component was detached from the bed
+
     // Extrude fin2d into a solid prism along n (the plane normal), centered on the
     // fin plane: n in [-thickness/2, +thickness/2].
     indexed_triangle_set fin_local; // plane-frame coords (x=u, y=w, z=n), mm
