@@ -7,8 +7,6 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-#include "test_data.hpp"
-
 // Integration tests for slice-time fin injection: transient fin geometry is merged into the
 // object's mesh at the top of PrintObject::slice_volumes() and restored afterwards (see
 // TransientFinGuard there). These tests pin the two ends of that contract: an intersecting
@@ -100,9 +98,9 @@ SliceMetrics metrics_from(const Print &print)
 //
 // Print/Model are built by hand here (not via Slic3r::Test::init_print) so that the
 // FinFeatures can be attached to the ModelObject before the single Print::apply() call --
-// init_print()'s Model-reference overload already calls apply() internally, which would
-// require a second apply() to pick up a fin added afterwards, an untested code path this
-// phase doesn't need. The instance is placed well inside the default 200x200 bed
+// init_print() already calls apply() internally, which would require a second apply() to
+// pick up a fin added afterwards, an extra code path these tests don't mean to exercise.
+// The instance is placed well inside the default 200x200 bed
 // (config `printable_area`); this offset cannot affect what gets sliced -- only where these
 // tests place the object on the bed -- because trafo_centered() (see tall_thin_box() above)
 // excludes the instance's on-bed translation entirely.
@@ -131,7 +129,7 @@ SliceMetrics slice_metrics(const std::vector<FinFeature> &fins)
 
     print.auto_assign_extruders(object);
     print.apply(model, config);
-    // Return value intentionally ignored, matching Slic3r::Test::init_print() (test_data.cpp):
+    // validate()'s return value is intentionally ignored:
     // validate() also flags unrelated gcode-flavor/firmware advice (e.g. Marlin wanting
     // "G92 E0" in layer_gcode) that has no bearing on whether slicing itself produces correct
     // geometry, which is all these tests care about.
