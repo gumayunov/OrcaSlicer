@@ -6,7 +6,7 @@
 #include "slic3r/GUI/FinGhosts.hpp" // FinGhostRef (returned by value from selected_fin_ref())
 
 // Complete type needed: m_object_solid_bed below is a by-value indexed_triangle_set member
-// (the ghost-preview solid cache, T00-04-04), not just a reference/pointer.
+// (the ghost-preview solid cache), not just a reference/pointer.
 #include "libslic3r/TriangleMesh.hpp"
 
 // PendingFinSelection below holds an ObjectID by value; PanelCommit and panel_fin_world()
@@ -36,9 +36,8 @@ namespace GUI {
 //   n = horizontal plane normal
 // At z_angle == 0: u == +Y world, n == +X world.
 //
-// This gizmo owns transient UI state that the persistence path (T00-04-05) reads/writes
-// from/to a FinFeature on the object. The ImGui panel (T00-04-03) and ghost mesh
-// preview (T00-04-04) are both wired up here as well.
+// The gizmo owns transient UI state that is read from / written back to a FinFeature
+// on the object; the ImGui panel and the ghost mesh preview are wired up here as well.
 class GLGizmoFin : public GLGizmoBase
 {
     enum GrabberID {
@@ -56,26 +55,26 @@ class GLGizmoFin : public GLGizmoBase
     double m_length{ 8.0 };                 // L: plane extent along u, outward
 
     // Fin generation parameters, fed into generate_one_fin() for the ghost preview below
-    // (T00-04-04) and persisted to ModelObject::fins (T00-04-05). Defaults mirror
+    // and persisted to ModelObject::fins. Defaults mirror
     // FinFeature's; reset alongside the plane state in init_from_selection().
     double m_thickness{ 1.2 };  // t: fin wall thickness
     double m_conn_step{ 4.0 };  // X: vertical spacing of connectors
     double m_conn_gap{ 1.0 };   // gap: connector length / contour-follow distance
 
-    // Multi-fin selection (design 03): index into ModelObject::fins of the fin this panel
+    // Multi-fin selection: index into ModelObject::fins of the fin this panel
     // edits. Every former fins.front() call site targets fins[m_fin_idx]; switching fins
     // commits the panel first (WYSIWYG), so unselected fins always show committed state.
     int m_fin_idx{ 0 };
 
     // The fin to select once the Selection switch lands. Set by data_changed()'s
     // undo/redo re-selection (keeping the edited fin index across a restore) and by
-    // handle_ghost_click()'s cross-object/instance switch (design 03 phase 03).
+    // handle_ghost_click()'s cross-object/instance switch.
     // Consumed and cleared by init_from_selection(); ignored there when the selected
     // object no longer matches.
     struct PendingFinSelection { ObjectID object; int fin_idx{ -1 }; };
     std::optional<PendingFinSelection> m_pending_selection;
 
-    // WYSIWYG close-commit (T01-00-06): suppresses the close-time apply_to_model() call
+    // Suppresses the close-time apply_to_model() call
     // (on_set_state()'s Off branch) right after "Remove fin" -- without it, closing the gizmo
     // would immediately resurrect the fin the user just deleted (the panel still holds its
     // parameters and the ghost is still shown). Any subsequent commit gesture deliberately
@@ -103,7 +102,7 @@ class GLGizmoFin : public GLGizmoBase
     GLModel m_rotation_ring; // unit circle, scaled to rotation_ring_radius() at render time
     bool    m_rendering_items_ready{ false };
 
-    // Ghost preview (T00-04-04): the fin mesh generate_one_fin() would produce for the current
+    // Ghost preview: the fin mesh generate_one_fin() would produce for the current
     // plane/params, rendered semi-transparent over the plane. Two independent caches, each
     // rebuilt only when its own inputs change (never per render frame):
     //  - m_object_solid_bed: the selected instance's MODEL_PART volumes, merged in the world/bed
@@ -158,17 +157,17 @@ private:
     double      get_layer_height_snap_step() const;
     double      calc_axis_projection(const UpdateData& data, const Vec3d& ref_point, const Vec3d& axis_dir, double snap_step) const;
 
-    // Ghost preview (T00-04-04).
+    // Ghost preview.
     bool solid_cache_stale() const;
     void rebuild_object_solid();
     void update_ghost_preview();
     void render_ghost();
 
-    // ImGui side panel (T00-04-03).
+    // ImGui side panel.
     void init_input_window_layout();
     bool render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format, bool& committed);
 
-    // Persistence (T00-04-05): world (gizmo) <-> object-local (ModelObject::fins) conversion,
+    // Persistence: world (gizmo) <-> object-local (ModelObject::fins) conversion,
     // applying gizmo edits, and triggering a reslice. FinGeneratorInternal::fin_object_to_bed()/
     // fin_bed_to_object() (FinGenerator.hpp) hold the shared math; this gizmo's world frame IS
     // the bed frame (see the class doc comment), so "world" and "bed" mean the same thing below.
@@ -177,14 +176,14 @@ private:
     void                        apply_to_model(const std::string& snapshot_name);
     void                        remove_fin_from_model();
 
-    // Multi-fin plumbing (design 03).
+    // Multi-fin plumbing.
     FinFeature panel_fin_world() const;            // m_* plane/params -> bed-frame FinFeature
     bool       load_fin_into_panel(int fin_idx);   // fins[fin_idx] -> panel; false = missing/degenerate
     void       select_fin(int fin_idx);            // WYSIWYG-commit current, then load fins[fin_idx]
     void       add_fin();                          // commit current, create + select a new default fin
     int        stored_fin_count() const;
 
-    // Ghost-click fin selection (design 03).
+    // Ghost-click fin selection.
     void update_ghost_hover(const wxMouseEvent& mouse_event);
     bool handle_ghost_click(const wxMouseEvent& mouse_event);
 

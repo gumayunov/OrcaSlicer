@@ -1170,20 +1170,16 @@ void PrintObject::slice_volumes()
 
         explicit TransientFinGuard(PrintObject& po) : mo(po.model_object())
         {
-            // Cheap early-out: an object with no fins must do nothing at all --
-            // no host-volume lookup, no Flow/width resolution, no mesh copy/merge -- so
-            // this is a true no-op for the (overwhelmingly common) no-fin case.
+            // The (overwhelmingly common) no-fin case must be a true no-op: no host-volume
+            // lookup, no Flow/width resolution, no mesh copy/merge.
             if (mo->fins.empty())
                 return;
 
-            // Fins need an existing MODEL_PART volume to merge into and to attach to
-            // geometrically (object_solid_bed() below merges exactly these); with none,
-            // every fin's plane misses an empty solid and generate_fin_meshes() would
-            // return nothing anyway, so bail out before doing any further work.
+            // Fins need an existing MODEL_PART volume to merge into; with none, every fin's
+            // plane misses an empty solid and generate_fin_meshes() would return nothing anyway.
             //
-            // Known limitations of this host-volume scheme (acceptable for the current
-            // simple-solid-object phase, revisit if multi-part/multi-material fins are
-            // ever needed):
+            // Known limitations of this host-volume scheme (revisit if multi-part /
+            // multi-material fins are ever needed):
             //  - All fins are merged into the FIRST MODEL_PART volume and use
             //    printing_region(0)'s extrusion width, regardless of which volume a fin
             //    is geometrically closest to -- so on a multi-part object a fin always
@@ -1199,14 +1195,11 @@ void PrintObject::slice_volumes()
 
             const Transform3d to_bed       = po.trafo_centered();
             const double      layer_height = po.config().layer_height.value;
-            // Fins aren't tied to any particular PrintRegion (material/extruder), so their
-            // wall reuses whatever width an ordinary inner perimeter of this object's first
-            // region would get: PrintRegionConfig::inner_wall_line_width, falling back to
-            // PrintObjectConfig::line_width, falling back to a nozzle-diameter-based auto
-            // width if both are 0 -- see PrintRegion::flow() / Flow::new_from_config_width().
-            // Tabs are 2*line_width thick (FinGenerator.cpp), so this must not be 0; since a
-            // MODEL_PART volume was just found above, this object has at least one printing
-            // region, so printing_region(0) is always valid here.
+            // Fins aren't tied to any particular PrintRegion, so their wall reuses the width
+            // an ordinary inner perimeter of the first region would get (PrintRegion::flow()
+            // resolves the config fallback chain and never yields 0 -- connector tabs are
+            // 2*line_width thick, so a zero width would degenerate them). A MODEL_PART volume
+            // was just found above, so printing_region(0) is always valid here.
             const double line_width = po.printing_region(0).flow(po, frPerimeter, layer_height, /*first_layer=*/false).width();
 
             std::vector<TriangleMesh> fins = generate_fin_meshes(*mo, to_bed, layer_height, line_width);
@@ -1215,11 +1208,10 @@ void PrintObject::slice_volumes()
                 return;
             }
 
-            // bed frame -> base_vol's own local mesh frame: every volume is sliced under
-            // trafo_centered() * volume->get_matrix() (slice_volumes_inner() below), so
-            // merging fin triangles expressed in that local frame reproduces exactly the
-            // bed-frame geometry generate_fin_meshes() built, once sliced through the same
-            // composition.
+            // bed frame -> base_vol's local mesh frame: every volume is sliced under
+            // trafo_centered() * volume->get_matrix() (slice_volumes_inner() below), so fin
+            // triangles expressed in that local frame come out at exactly the bed-frame
+            // positions generate_fin_meshes() built.
             const Transform3d bed_to_base_local = base_vol->get_matrix().inverse() * to_bed.inverse();
 
             orig_mesh = base_vol->get_mesh_shared_ptr(); // keep the original mesh alive for restoration

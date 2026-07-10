@@ -93,7 +93,7 @@ TEST_CASE("FinFeature cereal roundtrip preserves all fields", "[fin]")
     CHECK_THAT(dst.conn_gap, WithinAbs(1.25, 1e-9));
 }
 
-// --- FinFeature: .3mf persistence (T00-03-01) -------------------------------
+// --- FinFeature: .3mf persistence -------------------------------------------
 
 namespace {
 
@@ -296,15 +296,12 @@ TEST_CASE("fin: loading a 3mf without fins is fine", "[fin]")
 
 TEST_CASE("fin: corrupt fin_information.xml in a 3mf does not abort project load", "[fin]")
 {
-    // Cross-cutting robustness note (T00-03-01 review, docs/designs/00-vertical-fin/progress.md):
-    // bbs_3mf.cpp has 4 unguarded pt::read_xml() call sites (the cut/brim/config-info readers,
-    // plus ours) -- ALL of them throw an uncaught xml_parser_error on truncated/corrupt XML,
-    // which aborts the WHOLE project load, not just that one piece of metadata. This feature's
-    // fix is scoped to only our own extractor (_extract_fin_information_from_archive): a
-    // try/catch around its read_xml() logs a warning and skips fins gracefully, leaving the
-    // other three sites' systemic risk for upstream (fixing those would change cut/brim
-    // behavior, out of this feature's scope). This test pins the graceful-skip behavior
-    // end-to-end through the real load_bbs_3mf() entry point.
+    // An uncaught xml_parser_error from pt::read_xml() would abort the WHOLE project load, not
+    // just the fin metadata. _extract_fin_information_from_archive() therefore wraps its
+    // read_xml() in a try/catch that logs a warning and skips fins gracefully (the pre-existing
+    // cut/brim/config-info readers have the same unguarded pattern; fixing those is out of this
+    // feature's scope). This test pins the graceful-skip behavior end-to-end through the real
+    // load_bbs_3mf() entry point.
     Model m = model_with_default_fin();
     Model dst;
     // Truncated/unterminated XML replaces fin_information.xml inside a real archive.
@@ -316,19 +313,19 @@ TEST_CASE("fin: corrupt fin_information.xml in a 3mf does not abort project load
     CHECK(dst.objects.front()->fins.empty()); // fins skipped gracefully; rest of the project intact
 }
 
-TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angle, no dir_x) migrates on load",
+TEST_CASE("fin: legacy fin_information.xml (anchor_x/anchor_y/z_angle, no dir_x) migrates on load",
           "[fin]")
 {
-    // Design 02 §3/Goal 4: a .3mf saved by a pre-design-02 build only ever wrote
-    // anchor_x/anchor_y/z_angle (2D object-local anchor + azimuth about the object Z axis), never
-    // dir_x/dir_y/dir_z. _extract_fin_information_from_archive() must detect the absence of
-    // dir_x and migrate on the fly: anchor = (anchor_x, anchor_y, 0), dir = dir_from_z_angle(z_angle)
-    // -- built the same way the corrupt-xml test above reaches load_bbs_3mf() (hand-replacing just
+    // An early build of this feature only ever wrote anchor_x/anchor_y/z_angle (2D object-local
+    // anchor + azimuth about the object Z axis), never dir_x/dir_y/dir_z.
+    // _extract_fin_information_from_archive() must detect the absence of dir_x and migrate on
+    // the fly: anchor = (anchor_x, anchor_y, 0), dir = dir_from_z_angle(z_angle) -- built the
+    // same way the corrupt-xml test above reaches load_bbs_3mf() (hand-replacing just
     // fin_information.xml inside a real archive), so this exercises the real load path end to end.
     const double legacy_anchor_x = 5.5, legacy_anchor_y = -2.25, legacy_z_angle = 0.9;
 
-    // The enabled="..." attribute is legacy (design 03 removed the mechanism); fixtures keep
-    // it to pin that the importer silently ignores it.
+    // The enabled="..." attribute is legacy (the per-fin enable/disable mechanism was removed);
+    // fixtures keep it to pin that the importer silently ignores it.
     std::ostringstream legacy_xml; // hand-written legacy-format document (no dir_x/dir_y/dir_z at all)
     legacy_xml << "<?xml version=\"1.0\"?><fins><object id=\"1\"><fin "
                << "anchor_x=\"" << legacy_anchor_x << "\" "
@@ -355,7 +352,7 @@ TEST_CASE("fin: legacy (design 00) fin_information.xml (anchor_x/anchor_y/z_angl
 
 TEST_CASE("fin: degenerate (zero) fin direction in fin_information.xml is skipped at load", "[fin]")
 {
-    // Trust boundary (design 02 review): everything downstream assumes finite fields and a
+    // Trust boundary: everything downstream assumes finite fields and a
     // normalized dir; the importer must drop a violating fin (with a warning), not load it.
     // A zero dir is the trigger that behaves identically on every platform: "nan"/"inf" also
     // hit the same guard where iostreams accept them (libstdc++), but on libc++/MSVC they fail
@@ -391,7 +388,7 @@ TEST_CASE("plane_to_bed maps the local origin to the anchor", "[fin]")
 
 TEST_CASE("plane_to_bed at z_angle=0 locks the coordinate contract", "[fin]")
 {
-    // Design contract (design doc §13): with z_angle = 0, u (local x, outward)
+    // Coordinate contract: with z_angle = 0, u (local x, outward)
     // maps to world +Y, and n (local z, plane normal) maps to world +X.
     FinFeature f;
     f.anchor = Vec3d::Zero();
@@ -451,11 +448,11 @@ TEST_CASE("bed_to_plane is the inverse of plane_to_bed", "[fin]")
     CHECK_THAT(p.z(), WithinAbs(2.0, 1e-9));
 }
 
-// --- FinGenerator: object <-> bed (world) conversion (T00-04-05) -----------
+// --- FinGenerator: object <-> bed (world) conversion ------------------------
 //
-// fin_object_to_bed()/fin_bed_to_object() are the gizmo's coordinate contract (design doc §13,
-// the T00-04-04 review note; design 02 replaced the 2D anchor_xy/z_angle pair with a full 3D
-// anchor/dir so the conversion survives an instance stood on its side): the gizmo edits a fin in
+// fin_object_to_bed()/fin_bed_to_object() are the gizmo's coordinate contract (the fin stores a
+// full 3D anchor/dir rather than a 2D anchor_xy/z_angle pair precisely so this conversion
+// survives an instance stood on its side): the gizmo edits a fin in
 // the BED (world) frame, but ModelObject::fins stores it OBJECT-LOCAL. fin_object_to_bed() is
 // generate_fin_meshes()'s own per-fin conversion (object -> bed, used to load an existing fin
 // into the gizmo); fin_bed_to_object() is its inverse (bed -> object, used to persist a gizmo
@@ -513,10 +510,10 @@ TEST_CASE("fin_object_to_bed / fin_bed_to_object round-trip: identity to_bed", "
 
 TEST_CASE("fin_bed_to_object / fin_object_to_bed round-trip: translated + Z-rotated instance", "[fin]")
 {
-    // Design 02 Goal 2: bed->object->bed is the identity direction (the gizmo commit/load
-    // cycle). object->bed->object deliberately is NOT exact when to_bed lifts the anchor off
+    // bed->object->bed is the exact direction (the gizmo commit/load cycle).
+    // object->bed->object deliberately is NOT exact when to_bed lifts the anchor off
     // z=0 (here: translation.z=3) -- fin_object_to_bed() re-anchors the plane at bed z=0, so
-    // the object-local representative point normalizes on the first pass (design 02 §2).
+    // the object-local representative point normalizes on the first pass.
     using namespace FinGeneratorInternal;
 
     Transform3d to_bed = Transform3d::Identity();
@@ -538,9 +535,9 @@ TEST_CASE("fin_bed_to_object / fin_object_to_bed round-trip: instance tipped 30d
 {
     // A partial (non-90deg) tip about a horizontal in-plane axis: the object-local frame no
     // longer aligns with the bed, but to_bed stays invertible, so the bed->object->bed cycle
-    // (the gizmo's commit/load direction, design 02 Goal 2) is still exact. The opposite
+    // (the gizmo's commit/load direction) is still exact. The opposite
     // direction would NOT be: the tip gives the stored dir's bed image a vertical component,
-    // which fin_object_to_bed() drops when normalizing (design 02 §2).
+    // which fin_object_to_bed() drops when normalizing.
     using namespace FinGeneratorInternal;
 
     Transform3d to_bed(Eigen::AngleAxisd(PI / 6.0, Vec3d::UnitX())); // 30deg
@@ -665,10 +662,10 @@ TEST_CASE("fin: cross-section of a centered cube is non-empty", "[fin]")
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
-    // Window semantics (design doc §15): the anchor sits at the cube's own center along u, so the
+    // Window semantics: the anchor sits at the cube's own center along u, so the
     // section's surface is at local u = 10 (half-width) and the window's near edge (after the gap)
     // is at u = 11. length must clear that to leave any window open at all -- 16 (> 11) does, with
-    // room to spare; length=8 (pre-§15) would land the whole window inside the part+gap -> empty.
+    // room to spare; a shorter length (e.g. 8) would land the whole window inside the part+gap -> empty.
     f.length    = 16.0;
 
     CHECK_FALSE(generate_one_fin(cube, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
@@ -697,13 +694,11 @@ TEST_CASE("fin: 2D region is a truncated rectangle on one side", "[fin]")
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
-    // Window semantics (design doc §15): with the anchor at the cube's own center (u=0), the
+    // Window semantics: with the anchor at the cube's own center (u=0), the
     // section's far-side surface sits at local u = 10 and the window's near edge (past the gap) at
     // u = 11 -- length must exceed that for the window to have any room left, on EITHER side of the
     // flip below (center-anchoring is symmetric, so one length works for both directions, unlike
-    // moving the anchor to a single face). 16 gives a clean 5mm-wide slice, same width the old
-    // bbox-rectangle model produced with length=6 (kept here only as a memorable round number, not
-    // because the exact width matters to this test).
+    // moving the anchor to a single face). 16 gives a clean 5mm-wide slice.
     f.length    = 16.0;
     f.conn_gap  = 1.0;
 
@@ -747,9 +742,9 @@ TEST_CASE("fin: wall has the requested thickness", "[fin]")
     f.anchor     = Vec3d(0.0, 0.0, 0.0);
     f.dir        = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height     = 15.0;
-    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near edge
-    // at u=11 (default conn_gap=1.0) -- length must exceed that or the fin is empty (length=6, the
-    // pre-§15 value, would be). This test only cares about the wall's thickness, not its width.
+    // Window semantics: center anchor -> surface at local u=10, window's near edge at u=11
+    // (default conn_gap=1.0) -- length must exceed that or the fin is empty.
+    // This test only cares about the wall's thickness, not its width.
     f.length     = 16.0;
     f.thickness  = 1.2;
 
@@ -766,12 +761,10 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 15.0;
-    // Window semantics (design doc §15): center anchor -> section's far-side surface at local
+    // Window semantics: center anchor -> section's far-side surface at local
     // u=10, window's near edge at u=11 (default conn_gap=1.0). length=16 (> 11) leaves a real
-    // window open; the pre-§15 value (6) would land the whole window inside the part+gap -> empty.
-    // 16 is also chosen so the *width* below (length - (surface+gap) = 16-11 = 5) matches exactly
-    // what the old bbox-rectangle model produced with length=6, so every number below this point
-    // (area/volume/tab math) is unchanged from before the §15 rework.
+    // window open, with width length - (surface+gap) = 16-11 = 5 -- the basis for every
+    // area/volume/tab number below.
     f.length    = 16.0;
     f.thickness = 1.2;
     // f.conn_step (4.0) and f.conn_gap (1.0) are left at their defaults.
@@ -788,7 +781,7 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     CHECK(m.stats().open_edges == 0); // closed (manifold) surface: the wall shell
                                        // AND every tab cube (its own closed box) are.
 
-    // Connector tabs (T00-01-05) are separate its_merge()'d shells -- no shared
+    // Connector tabs are separate its_merge()'d shells -- no shared
     // vertices with the wall or with each other (its_merge doesn't weld; see
     // FinGenerator.cpp) -- so number_of_parts is exactly 1 (wall) + one per tab
     // row, not 1: rows are w = 0, 4, 8, 12 (floor(15/4)+1 = 4 rows, conn_step=4
@@ -798,7 +791,7 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     REQUIRE(n_tab_rows == 4);
     CHECK(m.stats().number_of_parts == 1 + n_tab_rows); // one shell + one per tab
 
-    // fin2d is exactly known here (design doc §15): the plane (bed X=0) cuts the cube into a full
+    // fin2d is exactly known here: the plane (bed X=0) cuts the cube into a full
     // u in [-10,10], w in [0,30] cross-section, so the section's far-side surface is at local
     // u=10 for every w in [0,30]. The window is u in [0,16] (length=16), w in [0,15] (=height,
     // capped at min(15, model top=30) = 15, no capping here). The shadow covers u >= 10 everywhere
@@ -809,14 +802,14 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     // flipped/self-intersecting prism would not match this exactly).
     double wall_volume = 75.0 * f.thickness;
     // Each tab spans d(w) + model_overlap + fin_overlap along u, d(w) = inner(w) - surface_u(w)
-    // (generate_one_fin, design doc §15 + the T00-05-01 penetration-depth fix). model_overlap =
+    // (see generate_one_fin()'s penetration-depth rules). model_overlap =
     // max(kTabOverlap, line_width) is the reach INTO the model (deep enough to clear its own
     // outer wall line, not just its surface line); fin_overlap = layer_height + kTabOverlap is
     // the reach INTO the fin body (deep enough to survive a sloped fin inner face receding over
     // one tab's own height -- see the tilted-slab test for the sloped case itself). Here
     // surface_u=10, conn_gap=1.0, inner=min(surface_u+conn_gap, length)=11 (length=16 doesn't
     // clamp it), so d=1.0, model_overlap=max(0.1, 0.45)=0.45, fin_overlap=0.2+0.1=0.3, and
-    // tab_len = 1.0 + 0.45 + 0.3 = 1.75 (up from the pre-fix 1.0 + 2*0.1 = 1.2).
+    // tab_len = 1.0 + 0.45 + 0.3 = 1.75.
     double model_overlap   = std::max(0.1, line_width); // must match generate_one_fin()'s kTabOverlap/line_width rule
     double fin_overlap     = layer_height + 0.1;         // must match generate_one_fin()'s layer_height + kTabOverlap rule
     double tab_volume      = (f.conn_gap + model_overlap + fin_overlap) * layer_height * (2.0 * line_width);
@@ -824,7 +817,7 @@ TEST_CASE("fin: wall mesh is a closed, outward-facing solid (positive volume)", 
     CHECK_THAT(m.volume(), WithinAbs(expected_volume, 0.05));
 }
 
-// --- FinGenerator: connector tabs (T00-01-05) -------------------------------
+// --- FinGenerator: connector tabs --------------------------------------------
 
 TEST_CASE("fin: fin_connector_rows == floor(H/X) + 1", "[fin]")
 {
@@ -839,7 +832,7 @@ TEST_CASE("fin: fin_connector_rows == floor(H/X) + 1", "[fin]")
 
 TEST_CASE("fin: fin_connector_rows clamps row spacing to at least one layer", "[fin]")
 {
-    // Phase 05 edge case: conn_step (0.1) smaller than layer_height (0.2) must not literally
+    // Edge case: conn_step (0.1) smaller than layer_height (0.2) must not literally
     // floor(H/conn_step)+1 = 201 rows -- effective_step = max(conn_step, layer_height) = 0.2
     // clamps it to what the object can actually resolve into distinct, non-overlapping rows.
     FinFeature f;
@@ -861,8 +854,8 @@ TEST_CASE("fin: connector count = floor(H/X)+1", "[fin]")
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
-    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near
-    // edge at u=11 -- length must exceed that (the pre-§15 value, 6, would leave the fin empty).
+    // Window semantics: center anchor -> surface at local u=10, window's near
+    // edge at u=11 -- length must exceed that or the fin is empty.
     // The exact width doesn't matter to this test (only tab counts/volume comparisons do).
     f.length    = 16.0;
     f.conn_step = 5.0;
@@ -894,14 +887,13 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     FinFeature f;
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
-    // f.height = 30 asks for a fin taller than the 10mm-tall model. Design doc §15 REVOKES the
-    // earlier "H above the model is allowed" rule (§8/§13.3): above the model's own top there is no
-    // section, hence no shadow, hence no fin material -- the window's own w-range is capped at
-    // min(H, model top) = min(30, 10) = 10 (generate_one_fin's `w_top`), so the fin's bbox must come
-    // out exactly 10mm tall, not 30.
+    // f.height = 30 asks for a fin taller than the 10mm-tall model. Above the model's own top
+    // there is no section, hence no shadow, hence no fin material -- the window's own w-range is
+    // capped at min(H, model top) = min(30, 10) = 10 (generate_one_fin's `w_top`), so the fin's
+    // bbox must come out exactly 10mm tall, not 30.
     f.height    = 30.0;
-    // Window semantics (design doc §15): center anchor -> surface at local u=10, window's near
-    // edge at u=11 -- length must exceed that (the pre-§15 value, 6, would leave the fin empty).
+    // Window semantics: center anchor -> surface at local u=10, window's near
+    // edge at u=11 -- length must exceed that or the fin is empty.
     f.length    = 16.0;
     f.conn_step = 5.0;
     f.conn_gap  = 1.0;
@@ -919,14 +911,14 @@ TEST_CASE("fin taller than the model: no tabs above the model top", "[fin]")
     CHECK(m.stats().number_of_parts == 1 + 3);
 }
 
-// --- FinGenerator: gizmo window + part shadow (design doc §15) -------------
+// --- FinGenerator: gizmo window + part shadow --------------------------------
 
 TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side or above the part", "[fin]")
 {
     // A tall, thin slab tilted about the X axis so its (u,w) cross-section at the fin's plane is
-    // a diagonal band, not an axis-aligned rectangle -- the shape that exposed the old bbox-
-    // rectangle bug (design doc §15): with the old model the fin could be built behind a tilted
-    // part, far from its surface, or above its actual top.
+    // a diagonal band, not an axis-aligned rectangle -- the shape where a naive bbox-rectangle
+    // region would build the fin behind the tilted part, far from its surface, or above its
+    // actual top. The window+shadow model must follow the real surface instead.
     //
     // Built via its_make_cube() + its_transform() with a REAL rotation (not a hand-rolled sheared
     // mesh), so winding/orientation come for free from its_make_cube()'s own correctness. Expected
@@ -998,7 +990,7 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
     constexpr double kTabOverlap    = 0.1; // must match generate_one_fin()'s own floor constant
     constexpr double kTabReachSlack = 0.2; // must match generate_one_fin()'s own constant
     constexpr double kSlack         = 0.3; // generous epsilon: float32 mesh vertices + kTabReachSlack
-    // Model-side tab reach (T00-05-01): max(kTabOverlap, line_width), must match generate_one_fin()'s
+    // Model-side tab reach: max(kTabOverlap, line_width), must match generate_one_fin()'s
     // own model_overlap -- line_width (0.45) dominates kTabOverlap (0.1) here.
     double model_overlap = std::max(kTabOverlap, line_width);
 
@@ -1019,7 +1011,7 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
 
     // (c) tabs only where the surface is within conn_gap + kTabReachSlack of the fin's inner edge
     // -- computed the same way generate_one_fin() does, from surface_u_strict() above. Row height
-    // uses effective_step = max(conn_step, layer_height) (phase 05 clamp), same as conn_step here
+    // uses effective_step = max(conn_step, layer_height), same as conn_step here
     // since conn_step(2.0) > layer_height(0.2).
     double effective_step = std::max(f.conn_step, layer_height);
     int n_rows         = FinGeneratorInternal::fin_connector_rows(f, layer_height);
@@ -1044,10 +1036,10 @@ TEST_CASE("fin: tilted slab -- shadow follows the surface, never the near side o
 
 TEST_CASE("fin: window fully inside the part -> empty mesh", "[fin]")
 {
-    // Window semantics (design doc §15): with the anchor at the cube's own center and a length
-    // that never reaches the section's far-side surface (10, half-width) plus the gap (1), the
-    // window [0,length] never overlaps the shadow (u >= surface_u(w) + gap) at all -- the
-    // "window entirely within the part+gap" empty-result contract (requirement 4).
+    // With the anchor at the cube's own center and a length that never reaches the section's
+    // far-side surface (10, half-width) plus the gap (1), the window [0,length] never overlaps
+    // the shadow (u >= surface_u(w) + gap) at all -- the "window entirely within the part+gap"
+    // empty-result contract.
     indexed_triangle_set cube = its_make_cube(20, 20, 20);
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
@@ -1064,8 +1056,8 @@ TEST_CASE("fin: window fully inside the part -> empty mesh", "[fin]")
 TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-width fin, zero tabs", "[fin]")
 {
     // Anchor placed so the section's surface sits at local u = -10 for every row (well beyond
-    // -(gap+kTabReachSlack) = -1.2) -- "the part is further out than the gizmo allows" (§15's
-    // tab rule) at EVERY row, but the shadow condition (u >= surface_u(w) + gap = -9) still covers
+    // -(gap+kTabReachSlack) = -1.2) -- "the part is further out than the gizmo allows", the
+    // no-tab rule, at EVERY row; but the shadow condition (u >= surface_u(w) + gap = -9) still covers
     // the entire window (u in [0,10]), since -9 < 0. Expect: the wall fills the window edge to
     // edge (no near-side carve, since offset_sec doesn't reach anywhere near u=0), but not a
     // single tab (d(w) = -surface_u(w) = 10 for every row, way past conn_gap + kTabReachSlack).
@@ -1092,17 +1084,17 @@ TEST_CASE("fin: part beyond the near edge farther than gap at every row -> full-
     CHECK_THAT(m.volume(), WithinAbs(150.0 * f.thickness, 0.5));
 }
 
-// --- FinGenerator: tab penetration depths (T00-05-01) -----------------------
+// --- FinGenerator: tab penetration depths ------------------------------------
 
 TEST_CASE("fin: tab penetration follows max(kTabOverlap, line_width) into the model and "
           "layer_height + kTabOverlap into the fin, clamped to the window's outer edge",
           "[fin]")
 {
-    // 2026-07-03 user report (progress.md): a flat kTabOverlap=0.1mm on both sides under-reached
-    // -- into the model it landed inside the outer wall LINE (tabs sliced as overhang "in the
-    // air"), and into the fin it could miss a sloped inner face entirely (see the tilted-slab
-    // test for that case). This axis-aligned fixture isolates the two depths and the far-edge
-    // clamp with simple, exact numbers.
+    // A flat kTabOverlap=0.1mm on both sides under-reaches: into the model it lands inside the
+    // outer wall LINE (tabs slice as overhang "in the air"), and into the fin it can miss a
+    // sloped inner face entirely (see the tilted-slab test for that case). This axis-aligned
+    // fixture isolates the two penetration depths and the far-edge clamp with simple, exact
+    // numbers.
     indexed_triangle_set cube = its_make_cube(20, 20, 20);
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f)); // surface_u = 10 for every row
 
@@ -1161,14 +1153,14 @@ TEST_CASE("fin: tab penetration follows max(kTabOverlap, line_width) into the mo
     }
 }
 
-// --- FinGenerator: multiple disjoint cross-sections (phase 05 edge case) ---
+// --- FinGenerator: multiple disjoint cross-sections --------------------------
 
 TEST_CASE("fin: two disjoint pillars in the section -- shadow/tabs measure the outermost lobe", "[fin]")
 {
     // Two separate pillars straddling the fin's cutting plane (world X=0 at z_angle=0, anchor
     // (0,0)): a near one (world Y in [3,5]) and a far one (world Y in [6.5,8.5]), both spanning
     // the same Z range -- slicing the merged solid at X=0 yields TWO disjoint rectangles in the
-    // (u,w) section, the "multiple disjoint cross-sections" edge case (phase 05 plan). The 1.5mm
+    // (u,w) section, the "multiple disjoint cross-sections" edge case. The 1.5mm
     // gap between them (5 to 6.5) is narrower than 2*conn_gap(1.0), so their conn_gap offsets
     // overlap and diff_ex() carves a single clean shadow region -- keeps this fixture's own
     // expected geometry simple while still exercising a genuinely 2-component section.
@@ -1177,7 +1169,7 @@ TEST_CASE("fin: two disjoint pillars in the section -- shadow/tabs measure the o
     // (FinGenerator.cpp): the extreme-u scan returns the OUTERMOST lobe's surface for tab
     // placement (the far pillar's u=8.5), regardless of a nearer lobe existing at the same
     // height (the near pillar's u=5.0) -- this test pins that current behavior, it does not
-    // change it (see design.md's own future-work note on multi-fin/multi-lobe support).
+    // change it.
     indexed_triangle_set near_pillar = its_make_cube(2, 2, 10); // -> world Y in [3,5], Z in [0,10]
     its_translate(near_pillar, Vec3f(-1.f, 3.f, 0.f));
     indexed_triangle_set far_pillar = its_make_cube(2, 2, 10); // -> world Y in [6.5,8.5], Z in [0,10]
@@ -1212,12 +1204,12 @@ TEST_CASE("fin: two disjoint pillars in the section -- shadow/tabs measure the o
     CHECK_THAT(m.bounding_box().min.y(), WithinAbs(8.5 - model_overlap, 1e-3));
 }
 
-// --- FinGenerator: very small conn_step vs. layer_height (phase 05 edge case) ---
+// --- FinGenerator: very small conn_step vs. layer_height ---------------------
 
 TEST_CASE("fin: conn_step smaller than layer_height does not produce overlapping/duplicate tab rows", "[fin]")
 {
-    // Before the fin_connector_rows()/generate_one_fin() clamp (T00-05-01), conn_step=0.1 with a
-    // 0.2mm layer_height would have asked for floor(2.0/0.1)+1 = 21 rows spaced 0.1mm apart -- each
+    // Without the fin_connector_rows()/generate_one_fin() clamp, conn_step=0.1 with a 0.2mm
+    // layer_height would ask for floor(2.0/0.1)+1 = 21 rows spaced 0.1mm apart -- each
     // tab is itself `layer_height` (0.2mm) tall, so consecutive rows would emit vertically
     // overlapping/duplicate tab slabs. effective_step = max(conn_step, layer_height) = 0.2 clamps
     // that to the object's actual layer resolution: 11 rows (w = 0, 0.2, ..., 2.0), each tab
@@ -1244,15 +1236,15 @@ TEST_CASE("fin: conn_step smaller than layer_height does not produce overlapping
     CHECK(m.stats().number_of_parts == 1 + 11);
 }
 
-// --- FinGenerator: components detached from the bed (design 04) ------------
+// --- FinGenerator: components detached from the bed ---------------------------
 
 TEST_CASE("fin: shelf overhanging the whole window -- the fin piece above it is dropped", "[fin]")
 {
     // Г-shaped part: a pillar (world Y in [-2,2], Z in [0,20]) with a shelf at Z in [8,10]
     // jutting out to Y=12, PAST the window's far edge (length=10). At shelf height the gap
     // carve (offset_sec) consumes the window's entire remaining width, so the fin material
-    // filled down from above the shelf has no path to the bed -- design 04 drops it instead
-    // of printing it in the air.
+    // filled down from above the shelf has no path to the bed -- the generator drops it
+    // instead of printing it in the air.
     indexed_triangle_set pillar = its_make_cube(4, 4, 20);
     its_translate(pillar, Vec3f(-2.f, -2.f, 0.f));
     indexed_triangle_set shelf = its_make_cube(4, 14, 2); // world Y in [-2,12], overlaps the pillar
@@ -1313,7 +1305,7 @@ TEST_CASE("fin: every component detached from the bed -> empty mesh", "[fin]")
 {
     // The shelf sits ON the bed (Z in [0,2]) and juts past the window's far edge: the gap
     // carve consumes the window's whole width right at the bed, so ALL remaining fin
-    // material (above the shelf) is airborne -- design 04 drops everything, empty mesh
+    // material (above the shelf) is airborne -- the generator drops everything, empty mesh
     // (same "no fin body" contract as a plane that misses the part).
     indexed_triangle_set pillar = its_make_cube(4, 4, 20);
     its_translate(pillar, Vec3f(-2.f, -2.f, 0.f));
@@ -1334,7 +1326,7 @@ TEST_CASE("fin: every component detached from the bed -> empty mesh", "[fin]")
     CHECK(generate_one_fin(solid, f, /*layer_height=*/0.2, /*line_width=*/0.45).empty());
 }
 
-// --- FinGenerator: negative/zero parameters (T00-01-03 review note) --------
+// --- FinGenerator: negative/zero parameters ----------------------------------
 
 TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or negative conn_gap "
           "yields an empty mesh",
@@ -1345,7 +1337,7 @@ TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or n
     // FinFeature with arbitrary values -- e.g. a hand-edited or corrupted project file. Negative
     // length/height in particular would otherwise flip the 2D rect's winding without crashing
     // Clipper, producing wrong-but-non-empty geometry rather than the "no fin" contract this
-    // guard now enforces (T00-01-03 review note, docs/designs/00-vertical-fin/progress.md).
+    // guard enforces.
     indexed_triangle_set cube = its_make_cube(20, 20, 20);
     its_translate(cube, Vec3f(-10.f, -10.f, 0.f));
 
@@ -1396,8 +1388,8 @@ TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or n
 
 // --- FinGenerator: generate_fin_meshes, object -> bed conversion ------------
 //
-// Pins down the anchor/azimuth conversion under a non-identity `to_bed`
-// (design §13.1-13.2): the fin is defined object-locally, but must come out
+// Pins down the anchor/azimuth conversion under a non-identity `to_bed`:
+// the fin is defined object-locally, but must come out
 // in the bed frame -- rotated instances only move the anchor / turn the
 // azimuth, and the fin itself must ALWAYS stand vertical on the bed (z from
 // 0). Expectations below are derived from the formulas in
@@ -1405,17 +1397,14 @@ TEST_CASE("generate_one_fin: non-positive length/height/thickness/conn_step or n
 // (z zeroed), bed z_angle = atan2(-u_bed.x, u_bed.y).
 //
 // Shared numbers (fin: height 10, length 16, gap 1, thickness 1.2, cube half-width 10 along the
-// relevant axis, anchor at the cube's own center -- window semantics, design doc §15): the
+// relevant axis, anchor at the cube's own center): the
 // section's far-side surface sits at local u=10 (from the center anchor), the window's near edge
-// (past the gap) at u=11, and length=16 keeps the window open past that (length=6, the pre-§15
-// value, would land the whole window inside the part+gap -> empty, breaking every test below).
-// fin body spans [11, 16] along +u beyond the section (u=16 is exactly the window's own right
-// edge now, rather than "surface + length" under the old bbox model -- see generate_one_fin()),
-// tabs bridge the gap starting at face-model_overlap (T00-05-01: max(kTabOverlap, line_width) =
+// (past the gap) at u=11, and length=16 keeps the window open past that.
+// The fin body spans [11, 16] along +u beyond the section (u=16 is exactly the window's own right
+// edge -- the window is measured from the anchor, see generate_one_fin()),
+// tabs bridge the gap starting at face-model_overlap (model_overlap = max(kTabOverlap, line_width) =
 // max(0.1, 0.45) = 0.45 with the line_width used below), so the mesh spans ~[9.55, 16] along the
-// fin direction, [-0.6, 0.6] across (thickness), and [0, 10] in z. These numbers are unchanged
-// from before the §15 rework (only `length` moved, from 6 to 16, to compensate for the window now
-// being measured from the anchor instead of from the section's own edge).
+// fin direction, [-0.6, 0.6] across (thickness), and [0, 10] in z.
 
 namespace {
 
@@ -1453,7 +1442,7 @@ TEST_CASE("generate_fin_meshes: instance Z rotation turns the fin azimuth", "[fi
 
         BoundingBoxf3 bb = fins.front().bounding_box();
         CHECK_THAT(bb.max.y(), WithinAbs(16.0, 1e-3)); // +u == +Y at z_angle = 0
-        CHECK_THAT(bb.min.y(), WithinAbs(9.55, 1e-3)); // tabs reach max(kTabOverlap, line_width) into the cube (T00-05-01)
+        CHECK_THAT(bb.min.y(), WithinAbs(9.55, 1e-3)); // tabs reach max(kTabOverlap, line_width) into the cube
         CHECK_THAT(bb.size().x(), WithinAbs(1.2, 1e-3)); // thickness across the plane
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));
@@ -1470,7 +1459,7 @@ TEST_CASE("generate_fin_meshes: instance Z rotation turns the fin azimuth", "[fi
 
         BoundingBoxf3 bb = fins.front().bounding_box();
         CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3)); // +u == -X now
-        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // T00-05-01: max(kTabOverlap, line_width) reach
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // max(kTabOverlap, line_width) tab reach
         CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // still standing on the bed
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // still exactly `height` tall
@@ -1497,7 +1486,7 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
     SECTION("fin whose u-axis stays horizontal is generated, vertical on the bed")
     {
         // z_angle = PI/2 -> u_obj = (-1,0,0); Rx(90) leaves the X axis in place, so
-        // u_bed = (-1,0,0): fin along bed -X. Design §13.2's key promise: despite
+        // u_bed = (-1,0,0): fin along bed -X. The conversion's key promise: despite
         // the tipped instance the fin stands VERTICAL in the bed frame -- z from 0
         // (the bed) to exactly `height`, not tipped along with the object.
         FinFeature f = conversion_test_fin();
@@ -1512,7 +1501,7 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
         CHECK_THAT(bb.min.z(), WithinAbs(0.0, 1e-3));    // starts at the bed
         CHECK_THAT(bb.max.z(), WithinAbs(10.0, 1e-3));   // exactly `height` tall
         CHECK_THAT(bb.min.x(), WithinAbs(-16.0, 1e-3));  // beyond the cube's -X face
-        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // T00-05-01: max(kTabOverlap, line_width) reach
+        CHECK_THAT(bb.max.x(), WithinAbs(-9.55, 1e-3)); // max(kTabOverlap, line_width) tab reach
         CHECK_THAT(bb.size().y(), WithinAbs(1.2, 1e-3)); // thickness across the plane
     }
 
@@ -1530,13 +1519,12 @@ TEST_CASE("generate_fin_meshes: instance tipped 90deg about X keeps the fin vert
     }
 }
 
-// --- FinGenerator: one mesh per fin (design 03 regression lock) ---
+// --- FinGenerator: one mesh per fin -------------------------------------------
 
 TEST_CASE("generate_fin_meshes: builds a mesh for every fin", "[fin]")
 {
-    // Regression lock for design 03 (multi-fin gizmo): the generator has been multi-fin from the
-    // start -- one mesh per stored fin, none shadowing or dropping its siblings. Locked here
-    // before the gizmo learns to create more than one fin.
+    // The generator is multi-fin: one mesh per stored fin, none shadowing or dropping its
+    // siblings.
     Model        model;
     ModelObject* o = model.add_object();
     TriangleMesh cube = make_cube(20.0, 20.0, 20.0);
@@ -1563,7 +1551,7 @@ TEST_CASE("generate_fin_meshes: builds a mesh for every fin", "[fin]")
     CHECK(meshes[1].bounding_box().min.y() < -10.0); // f2's wall beyond the cube's -Y face
 }
 
-// --- FinGenerator: visual checkpoint (T00-01-06) ----------------------------
+// --- FinGenerator: visual checkpoint ------------------------------------------
 //
 // Not a real regression test: dumps binary STLs of the input cube and the
 // generated fin to disk so a human can eyeball the result in a mesh viewer.
@@ -1587,13 +1575,12 @@ TEST_CASE("fin: visual STL dump for manual inspection", "[fin-visual][.]")
     // against the 40mm-tall cube; thickness/conn_step/conn_gap stay at
     // their defaults (1.2, 4, 1).
     f.height = 25.0;
-    // Window semantics (design doc §15): the anchor sits at the cube's own center along u
-    // (like the other §15-updated tests, e.g. "fin: wall mesh is a closed, outward-facing
+    // Window semantics: the anchor sits at the cube's own center along u
+    // (like e.g. "fin: wall mesh is a closed, outward-facing
     // solid"), so the section's far-side surface is at local u=10 (half-width) and the
-    // window's near edge (past the default 1mm conn_gap) is at u=11. The pre-§15 default
-    // length (8) now lands the whole window inside the part+gap -> EMPTY mesh (this is the
-    // T00-01-06 fixture the T00-05 review flagged as stale). Bumped to 16, same value used
-    // by the other updated tests, for a real 5mm-wide wall.
+    // window's near edge (past the default 1mm conn_gap) is at u=11. length=16, same value
+    // used by the other tests, leaves a real 5mm-wide wall (the default length, 8, would
+    // land the whole window inside the part+gap -> EMPTY mesh).
     f.length = 16.0;
 
     double layer_height = 0.2, line_width = 0.45;

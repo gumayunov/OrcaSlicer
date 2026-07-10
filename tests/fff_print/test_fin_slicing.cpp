@@ -9,13 +9,10 @@
 
 #include "test_data.hpp"
 
-// T00-02-01 (design 00, phase 02): failing fff_print integration tests for slice-time fin
-// injection. No injection code exists yet -- that's the next task (T00-02-02), which will
-// inject transient fin volumes at the top of PrintObject::slice_volumes(). These tests are
-// the TDD red for that task: "fin adds geometry" is expected to FAIL right now
-// (nothing adds the fin's geometry to the sliced object yet); "no-intersection is
-// identical to no fin" is expected to pass trivially (there is no code path that could change
-// the output either way).
+// Integration tests for slice-time fin injection: transient fin geometry is merged into the
+// object's mesh at the top of PrintObject::slice_volumes() and restored afterwards (see
+// TransientFinGuard there). These tests pin the two ends of that contract: an intersecting
+// fin adds sliced geometry; a non-intersecting fin leaves the slice identical to no fin.
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -55,12 +52,11 @@ FinFeature crossing_fin()
     f.anchor    = Vec3d(0.0, 0.0, 0.0);
     f.dir       = FinGeneratorInternal::dir_from_z_angle(0.0);
     f.height    = 20.0;
-    // Window semantics (design doc §15): the anchor sits at the box's own center along u, so the
-    // section's far-side surface is at local u=5 (half-width) and the window's near edge (past the
-    // 1mm gap) is at u=6. length=6 (the pre-§15 value) would put the window's own right edge
-    // exactly ON that near edge -- a degenerate/empty window -- so length is bumped to 8, leaving a
-    // real (if narrow, u in [6,8]) window open; this is the minimum change needed to keep "adds
-    // geometry" meaningfully true, the qualitative property this fixture's tests actually check.
+    // The gizmo window spans u in [0, length] from the anchor, and fin material only exists past
+    // the section's far surface plus the gap. With the anchor at the box's own center the surface
+    // is at local u=5 (half-width) and the window's usable region starts at u=6 (past the 1mm
+    // gap), so length=8 leaves a real (if narrow, u in [6,8]) window open -- enough to keep "adds
+    // geometry" meaningfully true, the qualitative property this fixture's tests check.
     f.length    = 8.0;
     f.thickness = 1.2;
     f.conn_step = 4.0;
@@ -146,8 +142,8 @@ SliceMetrics slice_metrics(const std::vector<FinFeature> &fins)
     return metrics_from(print);
 }
 
-// Old single-fin entry point, kept for the pre-design-03 tests below: null means "no fin at
-// all" (the baseline), non-null a single fin.
+// Single-fin convenience wrapper: null means "no fin at all" (the baseline), non-null a
+// single fin.
 SliceMetrics slice_metrics(const FinFeature *fin)
 {
     std::vector<FinFeature> fins;
@@ -167,15 +163,14 @@ TEST_CASE("fin: fin adds geometry to the sliced object", "[fin]")
 
     // Fin height (20) is within the box's own Z range (40), so no layers are added or removed.
     CHECK(with_fin.layer_count == baseline.layer_count);
-    // No injection exists yet (T00-02-02) -- this is expected to FAIL until that lands.
     CHECK(with_fin.area > baseline.area);
 }
 
 TEST_CASE("fin: every fin contributes geometry to the sliced object", "[fin]")
 {
-    // Regression lock for design 03 (multi-fin gizmo): slice-time injection is already
-    // multi-fin -- a second fin must ADD its own cross-section, not replace or shadow the
-    // first. The second fin mirrors crossing_fin() to the box's -Y side (dir flipped by PI):
+    // Slice-time injection is multi-fin: a second fin must ADD its own cross-section, not
+    // replace or shadow the first. The second fin mirrors crossing_fin() to the box's -Y side
+    // (dir flipped by PI):
     // center-anchoring is symmetric, so the same length keeps its window open there too, and
     // the two fins occupy disjoint regions -- their combined area is strictly larger.
     FinFeature first  = crossing_fin();

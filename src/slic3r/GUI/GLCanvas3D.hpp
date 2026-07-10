@@ -683,7 +683,7 @@ public:
 
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
-    FinGhostsRenderer m_fin_ghosts; // design 01: always-visible fin ghosts (Prepare view)
+    FinGhostsRenderer m_fin_ghosts; // always-visible fin ghosts (Prepare view)
 
     struct ToolbarHighlighter
     {

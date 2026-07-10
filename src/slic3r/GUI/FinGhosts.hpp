@@ -1,8 +1,8 @@
 #pragma once
 
-// Shared fin ghost-preview machinery (design 01): FinGhost -- the primitives GLGizmoFin's
+// Shared fin ghost-preview machinery: FinGhost -- the primitives GLGizmoFin's
 // live editing preview and the persistent scene ghosts have in common; FinGhostsRenderer
-// (added in T01-00-03) -- the always-visible per-(object x instance) scene ghosts.
+// -- the always-visible per-(object x instance) scene ghosts.
 
 #include "slic3r/GUI/GLModel.hpp"
 #include "slic3r/GUI/MeshUtils.hpp" // MeshRaycaster (complete type needed for unique_ptr member)
@@ -28,12 +28,10 @@ class Camera;
 
 namespace FinGhost {
 
-// Layer height from the active print preset, `fallback` without one
-// (moved verbatim from GLGizmoFin::preset_layer_height()).
+// Layer height from the active print preset, `fallback` without one.
 double preset_layer_height(double fallback);
 
-// generate_one_fin() inputs for preview meshes. Fidelity notes live in the .cpp
-// (moved from GLGizmoFin::resolve_preview_layer_height()/resolve_preview_line_width()).
+// generate_one_fin() inputs for preview meshes; fidelity notes live in the .cpp.
 double preview_layer_height();
 double preview_line_width();
 
@@ -74,7 +72,7 @@ struct FinPick
     ObjectID instance_id;
 };
 
-// Always-visible scene ghosts (design 01): one translucent fin preview per
+// Always-visible scene ghosts: one translucent fin preview per
 // (object-with-fins x instance), rendered by GLCanvas3D without the Fin gizmo.
 // Cached ghost meshes follow the object rigidly while the instance delta keeps the
 // bed-frame silhouette (XY move / Z spin -- FinGeneratorInternal::is_bed_rigid_delta());
@@ -89,7 +87,7 @@ public:
     // GLVolume matches (they coincide outside a drag). The fin set via set_selected() is
     // suppressed on EVERY instance of its object -- the Fin gizmo draws that fin's live,
     // possibly-uncommitted ghost itself; everything else (other fins of the same object
-    // included) renders from the committed model and is a valid pick target (design 03).
+    // included) renders from the committed model and is a valid pick target.
     void render(const Model& model, const GLVolumeCollection& volumes);
 
     // The fin the Fin gizmo currently edits (hidden + unpickable); default-constructed
@@ -152,8 +150,7 @@ private:
     // Regeneration cadence while a transform is in flux (mid-drag tilt/scale produces a
     // non-rigid delta every frame). An isolated change regenerates immediately: its
     // last_regen is at least one interval in the past by then. Also paces the preset
-    // lookups below. Starting value per design 01 -- tune on the manual checkpoint if
-    // the ghost feels too laggy/too hot.
+    // lookups below. Tune if the ghost feels too laggy or regenerates too hot.
     static constexpr auto RegenInterval = std::chrono::milliseconds(200);
 
     // (ModelObject id, ModelInstance id) -> entry. Instance IDs (not indices) keep the

@@ -2646,12 +2646,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             try {
                 pt::read_xml(iss, fins_tree);
             } catch (const std::exception& e) {
-                // Corrupt/truncated fin_information.xml must not abort the WHOLE project load
-                // (T00-03-01 review note, docs/designs/00-vertical-fin/progress.md): this is one
-                // of four unguarded pt::read_xml() call sites in this file (the cut/brim/config
-                // readers share the same systemic risk) -- fixing all four is a cross-cutting
-                // change out of this feature's scope, so only OUR extractor is hardened here.
-                // Skip fins gracefully; the rest of the project (model, other metadata) still loads.
+                // Corrupt/truncated fin_information.xml must not abort the WHOLE project load.
+                // Other pt::read_xml() call sites in this file share the same risk, but hardening
+                // them is a cross-cutting change out of this feature's scope -- only the fin
+                // extractor is guarded here. Skip fins gracefully; the rest of the project
+                // (model, other metadata) still loads.
                 BOOST_LOG_TRIVIAL(warning) << "_BBS_3MF_Importer: failed to parse " << FIN_INFORMATION_FILE
                                             << ": " << e.what() << " -- skipping fins";
                 return;
@@ -2691,8 +2690,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                          fin_tree.get<double>("<xmlattr>.dir_y", f.dir.y()),
                                          fin_tree.get<double>("<xmlattr>.dir_z", f.dir.z()));
                     } else {
-                        // Legacy (design 00) fin_information.xml: 2D object-local anchor + azimuth about
-                        // the object Z axis -- migrate on the fly (design 02 §3).
+                        // Legacy first-generation fin_information.xml: 2D object-local anchor +
+                        // azimuth about the object Z axis -- migrate on the fly to anchor + dir.
                         f.anchor = Vec3d(fin_tree.get<double>("<xmlattr>.anchor_x", 0.0),
                                          fin_tree.get<double>("<xmlattr>.anchor_y", 0.0), 0.0);
                         f.dir    = FinGeneratorInternal::dir_from_z_angle(fin_tree.get<double>("<xmlattr>.z_angle", 0.0));

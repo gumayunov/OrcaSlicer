@@ -8336,12 +8336,12 @@ void GLCanvas3D::_render_sequential_clearance()
 void GLCanvas3D::_render_fin_ghosts()
 {
     // Prepare view only: the preview shows the fin as real toolpaths, the assemble
-    // view has no bed frame to anchor a fin to (design 01 §5).
+    // view has no bed frame to anchor a fin to.
     if (m_canvas_type != ECanvasType::CanvasView3D || m_model == nullptr)
         return;
     // While the Fin gizmo is open it draws the SELECTED fin's live (possibly uncommitted)
     // ghost itself; the scene still renders every other fin -- they are the pick targets
-    // for ghost-click fin selection (design 03). Hover state is pushed by the gizmo on
+    // for ghost-click fin selection. Hover state is pushed by the gizmo on
     // mouse moves and must not survive it.
     FinGhostRef selected;
     if (m_gizmos.get_current_type() == GLGizmosManager::EType::Fin) {

@@ -55,18 +55,18 @@ indexed_triangle_set object_solid_bed(const ModelObject& object, const Transform
 
 int fin_connector_rows(const FinFeature& f, double layer_height)
 {
-    // Clamp the row spacing to at least one layer (phase 05 edge case -- see the doc comment in
-    // FinGenerator.hpp): must match generate_one_fin()'s own effective_step exactly, or the row
-    // count computed here and the row heights it actually emits tabs at would disagree.
+    // Clamp the row spacing to at least one layer (see the doc comment in FinGenerator.hpp):
+    // must match generate_one_fin()'s own effective_step exactly, or the row count computed
+    // here and the row heights it actually emits tabs at would disagree.
     double effective_step = std::max(f.conn_step, layer_height);
     // +1e-9: fp rounding guard -- e.g. 15.0/0.3 == 49.9999... must not drop a row
-    // (conn_step comes from GUI input in Phase 04, so "nice" ratios are common).
+    // (conn_step comes from GUI input, so "nice" ratios are common).
     return int(std::floor(f.height / effective_step + 1e-9)) + 1;
 }
 
 std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform3d& to_bed)
 {
-    // Full-3D mapping (design 02): anchor through the whole transform with its bed-Z
+    // Full-3D mapping: anchor through the whole transform with its bed-Z
     // dropped (the plane's bed anchor lives at z=0 by construction), direction through
     // the linear part with its vertical component dropped. The only degeneracy left is
     // geometric: the stored fin's u axis maps (near) vertical, i.e. its plane would lie
@@ -85,9 +85,9 @@ std::optional<FinFeature> fin_object_to_bed(const FinFeature& f, const Transform
 
 std::optional<FinFeature> fin_bed_to_object(const FinFeature& f_bed, const Transform3d& to_bed)
 {
-    // Exact inverse of fin_object_to_bed() for any invertible instance transform: the old
-    // 2x2 XY-block solve (singular for objects stood on their side -- the design-02 bug)
-    // is gone; both fields invert through the full 3D transform. NB the object->bed->object
+    // Exact inverse of fin_object_to_bed() for any invertible instance transform: both
+    // fields invert through the full 3D transform (a 2D XY-block solve would be singular
+    // for objects stood on their side). NB the object->bed->object
     // round trip re-anchors the plane at bed z=0 (anchor's own bed-Z is dropped above) --
     // the plane is identical, the representative point just normalizes; bed->object->bed
     // IS exact, which is what the gizmo commit/load cycle needs.
@@ -217,8 +217,7 @@ void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, d
 // max_side, else min), unscaled to mm. nullopt when no edge crosses the line
 // -- i.e. w is strictly above the model's own top (or the model has no
 // material at all), the caller's signal to skip a connector tab there
-// (design doc §13.3: a row *at* the model's top still gets a tab, only rows
-// *above* it don't -- see the "fin taller than the model" test).
+// (a row *at* the model's top still gets a tab, only rows *above* it don't).
 //
 // Edge-inclusion rule: a non-horizontal edge p1->p2 with y-span
 // [y0, y1] = [min(y1,y2), max(y1,y2)] counts as crossing iff y0 <= w <= y1
@@ -236,9 +235,8 @@ void add_prism(indexed_triangle_set& out, const ExPolygons& region, double n0, d
 // below w=0, so every edge touching the bed has 0 as its lower endpoint),
 // and w <= y1 covers w exactly at the model's own top (its upper endpoint).
 //
-// Shares the multi-component/concave caveat documented at the shadow construction
-// in generate_one_fin(): the extreme-u scan can pick the far edge of the wrong
-// disjoint piece of the section; same future centroid-filter fix applies.
+// Caveat: on a multi-component (or strongly concave) section the extreme-u scan
+// can pick the far edge of a different disjoint piece than the one the fin hugs.
 std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool max_side)
 {
     std::optional<double> best;
@@ -270,19 +268,16 @@ std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool ma
 // Sweeps every outer contour of `src` along the straight segment from (0,0) to `delta` (scaled mm,
 // u/w plane) via Clipper's Minkowski sum (ClipperLib::MinkowskiSum, vendored in
 // deps_src/clipper/clipper.hpp), unioning the per-contour results together. Used for both the +u
-// "shadow" sweep and the downward "fill to bed" sweep of generate_one_fin() (design doc §15) --
-// same primitive, different delta.
+// "shadow" sweep and the downward "fill to bed" sweep of generate_one_fin() -- same primitive,
+// different delta.
 //
 // Holes are intentionally dropped (only ep.contour is swept, never ep.holes): sweeping just the
-// outer contour reproduces the *filled* polygon's own Minkowski sum. Verified empirically (see the
-// scratch harness used while implementing this): MinkowskiSum(pattern, contour, closed=true) on a
-// square with a central square hole -- feeding only the outer contour -- yields a solid swept
-// rectangle, not a grooved one, because material swept in from the near side of where the hole used
-// to be closes the gap for any sweep length reaching past the hole's own width in the sweep
-// direction, which both call sites below guarantee (their `delta` always reaches past the window's
-// far edge / the bed, plus a margin). Consequence: a hole can never punch a "window" into the shadow
-// or the fill -- the outer silhouette alone determines both, matching the design's requirement that
-// holes can't create fin material where none should be.
+// outer contour reproduces the *filled* polygon's own Minkowski sum, because material swept in
+// from the near side of where a hole sits closes the gap for any sweep length reaching past the
+// hole's own width in the sweep direction -- which both call sites below guarantee (their `delta`
+// always reaches past the window's far edge / the bed, plus a margin). Consequence: a hole can
+// never punch a "window" into the shadow or the fill; the outer silhouette alone determines both,
+// so holes can't create fin material where none should be.
 ExPolygons sweep_ex(const ExPolygons& src, const Point& delta)
 {
     ClipperLib::Path pattern{Point(0, 0), delta};
@@ -305,9 +300,9 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
 {
     using namespace FinGeneratorInternal;
 
-    // Defensive hard guard (T00-01-03 review note + phase 05 plan): the GUI already clamps these
-    // to sane minimums (GLGizmoFin.cpp's MinFinDimension/MinFinParamValue), but .3mf/API callers
-    // can feed a FinFeature with arbitrary values -- e.g. a hand-edited or corrupted project file.
+    // Defensive hard guard: the GUI already clamps these to sane minimums (GLGizmoFin.cpp's
+    // MinFinDimension/MinFinParamValue), but .3mf/API callers can feed a FinFeature with
+    // arbitrary values -- e.g. a hand-edited or corrupted project file.
     // A non-positive length/height would otherwise flip the 2D rect's winding without crashing
     // Clipper, producing wrong-but-non-empty geometry instead of the "no fin" the caller should
     // get; conn_step <= 0 would divide by zero / infinite-loop fin_connector_rows(); thickness <=
@@ -329,14 +324,13 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (section.empty())
         return TriangleMesh(); // plane doesn't intersect the solid -> no fin body
 
-    // 2D fin region: gizmo window + part shadow (design doc §15, revoking the earlier
-    // bbox-rectangle model in §6/§13). The gizmo rectangle window = [0,L] x [0,H] (anchor at
-    // u=0, i.e. the plane frame's own origin -- w=0 is the bed by contract) is the literal bound
-    // of where fin material may exist: WYSIWYG with the drawn gizmo rectangle. Within it,
-    // material is restricted to the part's "+u shadow" (never on the near side of the part, never
-    // above it), then filled straight down to the bed, then re-clipped to the gap clearance so
-    // overhanging part regions still keep their standoff. The flip (z_angle += PI, tested in
-    // test_fin.cpp) swaps which side is +u, so this single code path handles both sides.
+    // 2D fin region: gizmo window + part shadow. The gizmo rectangle window = [0,L] x [0,H]
+    // (anchor at u=0, i.e. the plane frame's own origin -- w=0 is the bed by contract) is the
+    // literal bound of where fin material may exist: WYSIWYG with the drawn gizmo rectangle.
+    // Within it, material is restricted to the part's "+u shadow" (never on the near side of the
+    // part, never above it), then filled straight down to the bed, then re-clipped to the gap
+    // clearance so overhanging part regions still keep their standoff. The flip (z_angle += PI)
+    // swaps which side is +u, so this single code path handles both sides.
     BoundingBox bb        = get_extents(section);
     coord_t     model_top = bb.max.y(); // part's own top at this plane (w, scaled)
     coord_t     w_top     = std::min(scaled(fin_bed_frame.height), model_top);
@@ -374,7 +368,7 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     if (fin2d.empty())
         return TriangleMesh(); // gap re-carve consumed everything the fill-down step produced
 
-    // Drop components not standing on the bed (design 04): the gap re-carve above can cut the
+    // Drop components not standing on the bed: the gap re-carve above can cut the
     // filled-down column -- a part region overhanging the window's entire remaining width leaves
     // the fin material above it with no path to the bed. Such a piece would print in the air and
     // serve no support purpose (tabs are breakaway connectors, not load-bearing anchors), so it
@@ -393,31 +387,28 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     indexed_triangle_set fin_local; // plane-frame coords (x=u, y=w, z=n), mm
     add_prism(fin_local, fin2d, -fin_bed_frame.thickness / 2., fin_bed_frame.thickness / 2.);
 
-    // Connector tabs (design doc §15, revoking the earlier "always conn_gap wide" rule): small
-    // boxes bridging the fin's inner edge to the part's surface, one row every effective_step mm
-    // along w (effective_step = max(conn_step, layer_height), see fin_connector_rows()'s doc
-    // comment -- a conn_step smaller than one layer would otherwise request duplicate,
-    // vertically-overlapping tab rows), starting at the bed (w=0) up to and including height. A
-    // row gets a tab only if (a) the section has material at that height (contour_u_at() returns
-    // a value) and (b) the part's surface is within conn_gap + kTabReachSlack of the fin's own
-    // inner edge -- the only way it isn't is the surface lying beyond the window's near edge
-    // ("part further out than the gizmo allows"), which the user confirmed should get no tab.
+    // Connector tabs: small boxes bridging the fin's inner edge to the part's surface, one row
+    // every effective_step mm along w (effective_step = max(conn_step, layer_height), see
+    // fin_connector_rows()'s doc comment), starting at the bed (w=0) up to and including height.
+    // A row gets a tab only if (a) the section has material at that height (contour_u_at()
+    // returns a value) and (b) the part's surface is within conn_gap + kTabReachSlack of the
+    // fin's own inner edge -- the only way it isn't is the surface lying beyond the window's
+    // near edge ("part further out than the gizmo allows"), which deliberately gets no tab.
     // kTabReachSlack tolerates the two independent computations (this closed-form d(w) vs. the
     // fin2d polygon boolean ops) landing a hair apart. A row can also have no fin material at all
     // (e.g. the window is fully consumed at that height) -- checked directly against fin2d rather
     // than re-derived, since deriving it from d(w) alone would miss multi-component sections (see
     // contour_u_at()'s own caveat -- also the reason tabs measure against the OUTERMOST lobe of a
-    // multi-lobe section, not necessarily the nearest one; see the "two disjoint pillars" test).
+    // multi-lobe section, not necessarily the nearest one).
     //
-    // Penetration depths (2026-07-03 user report, progress.md): each side of the tab must reach
-    // past its own "surface" by more than the old flat kTabOverlap=0.1mm, for two independent
-    // reasons --
+    // Penetration depths: each side of the tab must reach past its own "surface" by more than
+    // the flat kTabOverlap=0.1mm floor, for two independent reasons --
     //  - Model side: 0.1mm can land inside the model's own outer perimeter LINE (not yet solid
     //    material), so the tab's first extrusions have nothing under them and slice as an
     //    overhang ("in the air" in the G-code preview). `line_width` is the same representative
     //    wall width the caller already resolves for the tab's own thickness (2*line_width below;
     //    see PrintObjectSlice.cpp's TransientFinGuard) -- reusing it here guarantees model-side
-    //    penetration is at least one full wall line deep, never less than the old kTabOverlap.
+    //    penetration is at least one full wall line deep, never less than kTabOverlap.
     //  - Fin side: on a sloped inner edge (a tilted part), the fin's own inner face recedes by
     //    roughly slope*layer_height over the tab's own (single-layer) height, so a fixed 0.1mm
     //    can undershoot and miss the fin body entirely at steep slopes. A conservative constant
@@ -426,8 +417,8 @@ TriangleMesh generate_one_fin(const indexed_triangle_set& solid_bed_frame,
     //    to conn_gap) never has its tab reach past material that was never generated.
     constexpr double kTabOverlap    = 0.1; // mm past the model surface / fin inner edge, floor value (each side)
     constexpr double kTabReachSlack = 0.2; // mm tolerance for the d(w) <= gap reach check
-    // effective_conn_step (phase 05 edge case): a conn_step smaller than one layer would request
-    // duplicate/vertically-overlapping tab rows -- must match fin_connector_rows()'s own clamp.
+    // A conn_step smaller than one layer would request duplicate/vertically-overlapping tab
+    // rows -- must match fin_connector_rows()'s own clamp.
     double effective_conn_step = std::max(fin_bed_frame.conn_step, layer_height);
     int    n_rows              = fin_connector_rows(fin_bed_frame, layer_height);
     for (int k = 0; k < n_rows; ++k) {

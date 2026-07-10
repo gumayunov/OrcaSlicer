@@ -29,7 +29,7 @@ static constexpr double MinFinParamValue = 0.1; // mm -- thickness / connector s
 static constexpr double MinRotationRingRadius = 7.5; // mm -- min ring diameter 15mm
 static constexpr unsigned int RotationRingSegments = 48;
 
-// Plane fill tint (T00-04-04): default vs. "no intersection with the object" (mirrors
+// Plane fill tint: default vs. "no intersection with the object" (mirrors
 // GLGizmoCut3D's CUT_PLANE_DEF_COLOR / CUT_PLANE_ERR_COLOR switch in render_cut_plane()).
 static const ColorRGBA PlaneFillColor        = ColorRGBA(0.9f, 0.9f, 0.9f, 0.45f);
 static const ColorRGBA PlaneFillInvalidColor = ColorRGBA(1.0f, 0.8f, 0.8f, 0.5f);
@@ -55,13 +55,13 @@ void GLGizmoFin::on_set_state()
 {
     if (get_state() == On) {
         init_from_selection();
-        // T00-04-04: the ghost-preview solid cache is keyed off the selected object/instance
+        // The ghost-preview solid cache is keyed off the selected object/instance
         // (see rebuild_object_solid()), but the object's geometry may have changed since this
         // gizmo was last open even if the same instance is re-selected -- always rebuild fresh
         // on activation rather than relying solely on the object/instance-idx comparison.
         rebuild_object_solid();
     } else {
-        // WYSIWYG close (T01-00-06): what the ghost showed is what gets kept -- commit the
+        // WYSIWYG close: what the ghost showed is what gets kept -- commit the
         // panel state, including the untouched defaults of a freshly opened gizmo and a
         // typed-but-not-yet-committed field edit (its value already lives in the m_* state;
         // the per-gesture commit path would only pick it up on the NEXT ImGui frame, which
@@ -131,7 +131,7 @@ void GLGizmoFin::data_changed(bool is_serializing)
     m_apply_on_close = mo != nullptr && !mo->fins.empty();
 }
 
-// T00-04-05: loads the selected object's existing fin -- the pending fin (produced by
+// Loads the selected object's existing fin -- the pending fin (produced by
 // data_changed()'s undo/redo re-selection or by handle_ghost_click()'s cross-object
 // switch) or fins[0] -- when there is one, converting object-local -> world
 // via fin_object_to_bed() (the exact inverse of apply_to_model()'s world -> object-local
@@ -194,8 +194,8 @@ bool GLGizmoFin::load_fin_into_panel(int fin_idx)
 // regardless of whether a fin is already stored on the object).
 void GLGizmoFin::reset_to_defaults()
 {
-    // Anchor at the instance's own +Y silhouette edge, not the bbox center (design doc §15): with
-    // window semantics the gizmo rectangle is the literal bound of where fin material may exist,
+    // Anchor at the instance's own +Y silhouette edge, not the bbox center: the gizmo
+    // rectangle is the literal window bounding where fin material may exist,
     // so a center anchor would put the whole window inside the part for anything wider than 2*L,
     // yielding an empty (red) fin by default. At z_angle=0 (u == +Y, see plane_matrix()) this
     // puts the window's near edge (u=0) right at the part's surface, so the default fin hugs it
@@ -216,7 +216,7 @@ void GLGizmoFin::reset_to_defaults()
     m_conn_step = defaults.conn_step;
     m_conn_gap  = defaults.conn_gap;
 
-    m_ghost_dirty = true; // T00-04-04: the plane/params above just changed -- the cached ghost mesh is stale
+    m_ghost_dirty = true; // the plane/params above just changed -- the cached ghost mesh is stale
 }
 
 bool GLGizmoFin::on_is_selectable() const
@@ -254,13 +254,13 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
         return false;
     }
 
-    // Ghost hover highlight (design 03): observe-only -- never consume moves.
+    // Ghost hover highlight: observe-only -- never consume moves.
     if (mouse_event.Moving()) {
         update_ghost_hover(mouse_event);
         return false;
     }
 
-    // Ghost-click fin selection (design 03): a clean left press (no grabber hovered, no
+    // Ghost-click fin selection: a clean left press (no grabber hovered, no
     // camera drag in flight) on a scene ghost switches the edited fin -- possibly across
     // objects/instances. Consumed so the canvas never treats it as select/deselect.
     if (mouse_event.LeftDown() && !m_parent.is_mouse_dragging() && m_hover_id < 0
@@ -270,8 +270,8 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
     // Consume left-clicks that did not interact with any grabber (but not the
     // release of a camera drag): otherwise a stray click on empty space reaches
     // GLCanvas3D's deselect path, which deselects the object, closes this gizmo
-    // and throws away the not-yet-persisted fin parameters (persistence comes
-    // with T00-04-05). Same mechanism as GLGizmoCut3D / GLGizmoPainterBase.
+    // and throws away the not-yet-persisted fin parameters. Same mechanism as
+    // GLGizmoCut3D / GLGizmoPainterBase.
     // The gizmo is exited via its toolbar icon or Esc (GLGizmosManager::on_char
     // -> reset_all_states()).
     if (mouse_event.LeftUp() && !m_parent.is_mouse_dragging())
@@ -435,7 +435,7 @@ void GLGizmoFin::update_ghost_preview()
         // object in the scene or the object list while this gizmo stayed open -- on_is_activable()
         // keeps it open as long as the new selection is still a single full instance) from "the
         // SAME object/instance moved/rotated/gained-or-lost a volume". Only the former must reload
-        // the plane/params (T00-04-05): otherwise the previous object's plane position could
+        // the plane/params: otherwise the previous object's plane position could
         // silently get applied onto the new object on its next commit. The latter must NOT touch
         // plane/params -- that would blow away in-progress edits every time the object is nudged.
         const Selection& selection       = m_parent.get_selection();
@@ -464,7 +464,7 @@ void GLGizmoFin::update_ghost_preview()
     m_ghost_valid = FinGhost::build_ghost(m_ghost_model, m_object_solid_bed, fin_bed_frame);
 }
 
-// --- Persistence (T00-04-05) -------------------------------------------------
+// --- Persistence ------------------------------------------------------------
 
 // Approximate FinFeature equality for the "did the user actually change anything" check in
 // prepare_commit(). Both operands are BED-FRAME canonical forms (anchor.z == 0, unit
@@ -475,10 +475,10 @@ void GLGizmoFin::update_ghost_preview()
 static bool fins_approx_equal(const FinFeature& a, const FinFeature& b)
 {
     constexpr double eps = 1e-9;
-    // Angles are no longer stored (design 02): anchor and dir are both derived through a
-    // deterministic conversion chain and dir stays normalized, so a plain componentwise
-    // comparison suffices -- unlike the old z_angle, there is no +/-PI branch cut to fold away,
-    // and dir vs -dir are genuinely different sides, not an artifact to treat as equal.
+    // No angle field to compare: anchor and dir are both derived through a deterministic
+    // conversion chain and dir stays normalized, so a plain componentwise comparison
+    // suffices -- there is no +/-PI branch cut to fold away, and dir vs -dir are genuinely
+    // different sides, not an artifact to treat as equal.
     return std::abs(a.anchor.x() - b.anchor.x()) < eps
         && std::abs(a.anchor.y() - b.anchor.y()) < eps
         && std::abs(a.anchor.z() - b.anchor.z()) < eps
@@ -625,7 +625,7 @@ void GLGizmoFin::store_commit(ModelObject& mo, const PanelCommit& commit)
 // deserialization the m_* state genuinely differs from the freshly restored model, so
 // on_set_state() additionally guards the call with !is_serializing() (see its comment).
 //
-// Full persistence contract for the Fin gizmo (T01-00-06): every completed user gesture (drag-end,
+// Full persistence contract for the Fin gizmo: every completed user gesture (drag-end,
 // an ImGui field's IsItemDeactivatedAfterEdit(), Flip) calls this function
 // directly. On top of that, closing the gizmo (toolbar re-click, Esc, switching to another gizmo)
 // also calls this function once from on_set_state()'s Off branch, committing whatever the panel/ghost
@@ -698,13 +698,13 @@ void GLGizmoFin::add_fin()
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
-// "Remove fin" button (T00-04-05): erases ONLY the selected fin (fins[m_fin_idx], design 03) --
-// the ONLY way to delete a stored fin. No-op when the object has no fin to remove (nothing to
-// snapshot). When a fin survives, the nearest surviving neighbor is loaded into the panel
-// (WYSIWYG re-arm: closing then commits THAT fin). Only when the vector just got emptied is
-// the WYSIWYG close-commit suppressed (m_apply_on_close, T01-00-06): the panel still holds the
-// removed fin's parameters and the ghost stays visible, so without this, closing the gizmo
-// right after Remove would immediately resurrect the fin the user just deleted.
+// "Remove fin" button: erases ONLY the selected fin (fins[m_fin_idx]) -- the ONLY way to
+// delete a stored fin. No-op when the object has no fin to remove (nothing to snapshot).
+// When a fin survives, the nearest surviving neighbor is loaded into the panel (WYSIWYG
+// re-arm: closing then commits THAT fin). Only when the vector just got emptied is the
+// WYSIWYG close-commit suppressed (m_apply_on_close): the panel still holds the removed
+// fin's parameters and the ghost stays visible, so without this, closing the gizmo right
+// after Remove would immediately resurrect the fin the user just deleted.
 void GLGizmoFin::remove_fin_from_model()
 {
     ModelObject* mo = selected_model_object();
@@ -717,8 +717,8 @@ void GLGizmoFin::remove_fin_from_model()
     mo->fins.erase(mo->fins.begin() + removed);
 
     if (mo->fins.empty()) {
-        // Last fin gone: the panel keeps showing its parameters (pre-design-03 behavior)
-        // and the close-commit is suppressed so closing does not resurrect it.
+        // Last fin gone: the panel keeps showing its parameters and the close-commit
+        // is suppressed so closing does not resurrect it.
         m_fin_idx        = 0;
         m_apply_on_close = false;
     } else {
@@ -755,7 +755,7 @@ void GLGizmoFin::init_rendering_items()
     fill_data.add_vertex(Vec3f(0.0f, 1.0f, 0.0f));
     fill_data.add_triangle(0, 1, 2);
     fill_data.add_triangle(0, 2, 3);
-    fill_data.color = PlaneFillColor; // overridden every frame in render_plane() (T00-04-04: red tint when invalid)
+    fill_data.color = PlaneFillColor; // overridden every frame in render_plane() (red tint when invalid)
     m_plane_fill.init_from(std::move(fill_data));
 
     GLModel::Geometry border_data;
@@ -804,7 +804,7 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
 
     const Transform3d view_model_matrix = camera.get_view_matrix() * plane_m * Geometry::scale_transform(Vec3d(m_length, m_height, 1.0));
     shader->set_uniform("view_model_matrix", view_model_matrix);
-    // T00-04-04: tint the fill red when the plane misses the object's solid (no ghost to
+    // Tint the fill red when the plane misses the object's solid (no ghost to
     // show), mirroring GLGizmoCut3D::render_cut_plane()'s CUT_PLANE_DEF_COLOR/ERR_COLOR switch.
     m_plane_fill.set_color(m_ghost_valid ? PlaneFillColor : PlaneFillInvalidColor);
     m_plane_fill.render();
@@ -818,7 +818,7 @@ void GLGizmoFin::render_plane(const Transform3d& plane_m)
     shader->stop_using();
 }
 
-// T00-04-04: the fin mesh generate_one_fin() currently produces for m_object_solid_bed and
+// The fin mesh generate_one_fin() currently produces for m_object_solid_bed and
 // the plane/params, rebuilt only by update_ghost_preview() (see its callers) -- never here.
 // Drawn after the plane, semi-transparent, depth-tested against the rest of the scene.
 void GLGizmoFin::render_ghost()
@@ -869,7 +869,7 @@ void GLGizmoFin::on_render()
     glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    // T00-04-04: cheap no-op unless something is actually dirty (drag-end / ImGui edit /
+    // Cheap no-op unless something is actually dirty (drag-end / ImGui edit /
     // solid rebuild) -- see update_ghost_preview()'s doc comment. Must run before
     // render_plane() so the red/default tint below reflects this frame's result, not the
     // previous one.
@@ -900,12 +900,12 @@ void GLGizmoFin::on_start_dragging()
 void GLGizmoFin::on_stop_dragging()
 {
     m_drag_ref_captured = false;
-    // T00-04-04: rebuild the ghost preview once dragging ends -- not per drag frame. All four
+    // Rebuild the ghost preview once dragging ends -- not per drag frame. All four
     // grabbers (Move/ZRotation/TopHeight/OuterLength) feed generate_one_fin() one way or
     // another (anchor, dir, height, length), so any drag can invalidate the cached mesh.
     m_ghost_dirty = true;
 
-    // T00-04-05: persist on drag-end -- one snapshot per drag gesture (never per drag frame).
+    // Persist on drag-end -- one snapshot per drag gesture (never per drag frame).
     // Skip a no-op drag (e.g. a click that starts and immediately ends a "drag" without actually
     // moving anything): only take a snapshot when the plane genuinely changed since
     // on_start_dragging(), mirroring GLGizmoCut3D::on_stop_dragging()'s m_was_cut_plane_dragged
@@ -1013,8 +1013,8 @@ void GLGizmoFin::init_input_window_layout()
 // entry). Edits apply live (clamped to min_val) as soon as ImGui reports a change, so typing
 // immediately drives the gizmo state and the live ghost preview. `committed` is OR-ed with
 // ImGui::IsItemDeactivatedAfterEdit() (true once, the frame the field loses focus after having
-// been edited) -- T00-04-05's signal for when to persist the field's value onto
-// ModelObject::fins, as opposed to every keystroke.
+// been edited) -- the signal for when to persist the field's value onto ModelObject::fins,
+// as opposed to every keystroke.
 bool GLGizmoFin::render_double_field(const std::string& label, const char* imgui_id, double& value, double min_val, const char* format, bool& committed)
 {
     m_imgui->text(label);
@@ -1039,11 +1039,11 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     const float f_scale = m_parent.get_gizmos_manager().get_layout_scale();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f * f_scale));
 
-    // T00-04-04: any edit below that feeds generate_one_fin() invalidates the cached ghost
+    // Any edit below that feeds generate_one_fin() invalidates the cached ghost
     // preview; collected into one flag and applied once at the end rather than at each call
     // site.
     bool params_changed = false;
-    // T00-04-05: a field was "committed" (lost focus after being edited, or a single-shot button
+    // A field was "committed" (lost focus after being edited, or a single-shot button
     // like Flip was pressed) this frame -- persist once at the end of this function, one snapshot
     // per gesture, never per keystroke. Grabber drags persist separately, at drag-end
     // (on_stop_dragging()); this flag only covers the ImGui panel.
@@ -1085,7 +1085,7 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
 
     ImGui::Separator();
 
-    // Multi-fin navigation (design 03): the arrows cycle the selected fin -- the fallback
+    // Multi-fin navigation: the arrows cycle the selected fin -- the fallback
     // path for fins whose ghost is empty (plane misses the part) and therefore unclickable;
     // "+ Add fin" commits the current fin and creates-and-selects a new default one. The
     // count reflects the committed model; a fresh panel with no stored fin reads 1/1 with
@@ -1120,7 +1120,7 @@ void GLGizmoFin::on_render_input_window(float x, float y, float bottom_limit)
     if (field_committed)
         apply_to_model(_u8L("Edit fin"));
 
-    // T00-05-01: mirrors the red-plane tint (render_plane(), T00-04-04) with a textual warning --
+    // Mirrors the red-plane tint (render_plane()) with a textual warning --
     // covers both empty-result causes generate_one_fin() can hit (plane misses the object
     // entirely, or the window is fully swallowed by the part+gap): one generic message is enough
     // to point the user at the red plane, matching how GLGizmoCut3D flags its own invalid states.

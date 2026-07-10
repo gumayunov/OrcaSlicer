@@ -23,7 +23,7 @@ namespace FinGhost {
 // Ghost preview mesh color: ColorRGBA::ORANGE() at preview alpha.
 static const ColorRGBA GhostColor = ColorRGBA(0.923f, 0.504f, 0.264f, 0.45f);
 
-// Hovered pick target (design 03): same hue, brighter and more opaque, so clickability
+// Hovered pick target: same hue, brighter and more opaque, so clickability
 // is visible without stealing attention from the edited fin.
 static const ColorRGBA GhostHoverColor = ColorRGBA(1.0f, 0.62f, 0.35f, 0.65f);
 
@@ -50,7 +50,7 @@ double preview_layer_height()
 }
 
 // Extrusion line width for the ghost-preview mesh (fin wall / connector tabs).
-// Preview fidelity is secondary (per the plan): this resolves the shared "line_width" print
+// Preview fidelity is secondary here: this resolves the shared "line_width" print
 // option via Flow::extrusion_width(), the same utility Flow::new_from_config_width() (and so
 // PrintObjectSlice.cpp's TransientFinGuard, at slice time) ultimately falls back to for a
 // zero-valued *_line_width option -- it already implements the "0 -> nozzle-diameter-based
@@ -95,7 +95,7 @@ void render(GLModel& ghost, const Transform3d& model_matrix)
 {
     // NOT is_empty(): GLModel frees its CPU-side geometry after the first render() uploads
     // it to the GPU, flipping is_empty() to true; is_initialized() stays true for the
-    // model's lifetime (see the original comment in GLGizmoFin::render_ghost()).
+    // model's lifetime.
     if (!ghost.is_initialized())
         return;
 
@@ -212,7 +212,7 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
                 }
                 // else: keep drawing the stale ghost with the current (affine) delta
                 // below -- it visually sticks to the object; the exact shape catches
-                // up at the next regeneration (design 01 §4).
+                // up at the next regeneration.
             }
             if (!entry.generated)
                 continue; // throttled away before the very first generation
@@ -220,7 +220,7 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
             entry.last_delta = delta;
             for (const auto& ghost : entry.ghosts) {
                 if (m_selected.valid() && mo->id() == m_selected.object && ghost.fin_idx == m_selected.fin_idx)
-                    continue; // the Fin gizmo draws this fin's live ghost itself (design 03)
+                    continue; // the Fin gizmo draws this fin's live ghost itself
                 const bool hovered = m_hovered.valid() && mo->id() == m_hovered.object
                                   && instance->id() == m_hovered.instance
                                   && ghost.fin_idx == m_hovered.fin_idx;

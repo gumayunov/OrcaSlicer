@@ -344,8 +344,8 @@ struct FinFeature {
     // Plane anchor and outward (u-axis) direction. OBJECT-LOCAL when stored in
     // ModelObject::fins; BED-FRAME (anchor.z == 0, dir horizontal) when used as
     // generate_one_fin() input. Full 3D point + direction so any invertible instance
-    // transform round-trips exactly (design 02: the old 2D anchor_xy/z_angle pair
-    // degenerated when the object stood on its side and silently dropped every edit).
+    // transform round-trips exactly (a 2D anchor_xy/z_angle pair would degenerate when
+    // the object stands on its side and silently drop every edit).
     Vec3d  anchor {Vec3d::Zero()};
     Vec3d  dir    {0.0, 1.0, 0.0}; // kept normalized; +Y == old z_angle=0; dir vs -dir = flip side
     double height    {10.0};          // H — rectangle height (mm)
@@ -434,7 +434,7 @@ public:
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
 
-    FinFeatures fins;   // vertical fins (ORC-005); generated at slice time
+    FinFeatures fins;   // vertical fins; the wall geometry is generated at slice time
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
