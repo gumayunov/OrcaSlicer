@@ -1,14 +1,24 @@
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <fstream>
+#include "libslic3r/Point.hpp"
+#include "libslic3r/libslic3r.h"
+#include <limits>
 #include <random>
 #include <catch2/catch_all.hpp>
+#include <vector>
+#include <string>
 
+#include <catch2/catch_test_macros.hpp>
 #include "libslic3r/TriangleMesh.hpp"
+
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 
 TEST_CASE("Split empty mesh", "[its_split][its]") {
-    using namespace Slic3r;
 
     indexed_triangle_set its;
 
@@ -18,7 +28,6 @@ TEST_CASE("Split empty mesh", "[its_split][its]") {
 }
 
 TEST_CASE("Split simple mesh consisting of one part", "[its_split][its]") {
-    using namespace Slic3r;
 
     auto cube = its_make_cube(10., 10., 10.);
 
@@ -29,18 +38,19 @@ TEST_CASE("Split simple mesh consisting of one part", "[its_split][its]") {
     REQUIRE(res.front().vertices.size() == cube.vertices.size());
 }
 
+// Dump each split part as its own OBJ for eyeballing; no-op in release.
 void debug_write_obj(const std::vector<indexed_triangle_set> &res, const std::string &name)
 {
 #ifndef NDEBUG
     size_t part_idx = 0;
-    for (auto &part_its : res) {
-        its_write_obj(part_its, (name + std::to_string(part_idx++) + ".obj").c_str());
-    }
+    for (const auto &part_its : res)
+        write_debug_obj("indexed_triangle_set/" + name + std::to_string(part_idx++) + ".obj", part_its);
+#else
+    (void) res; (void) name;
 #endif
 }
 
 TEST_CASE("Split two non-watertight mesh", "[its_split][its]") {
-    using namespace Slic3r;
 
     auto cube1 = its_make_cube(10., 10., 10.);
     cube1.indices.pop_back();
@@ -63,7 +73,6 @@ TEST_CASE("Split two non-watertight mesh", "[its_split][its]") {
 }
 
 TEST_CASE("Split non-manifold mesh", "[its_split][its]") {
-    using namespace Slic3r;
 
     auto cube = its_make_cube(10., 10., 10.), cube_low = cube;
 
@@ -83,7 +92,6 @@ TEST_CASE("Split non-manifold mesh", "[its_split][its]") {
 }
 
 TEST_CASE("Split two watertight meshes", "[its_split][its]") {
-    using namespace Slic3r;
 
     auto sphere1 = its_make_sphere(10., 2 * PI / 200.), sphere2 = sphere1;
 
@@ -260,7 +268,6 @@ TEST_CASE("Reduce one edge by Quadric Edge Collapse", "[its]")
     CHECK(is_similar(its_, its, cfg));
 }
 
-#include "test_utils.hpp"
 TEST_CASE("Simplify mesh by Quadric edge collapse to 5%", "[its]")
 {
     TriangleMesh mesh = load_model("frog_legs.obj");

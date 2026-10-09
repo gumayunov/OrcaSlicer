@@ -8,17 +8,31 @@
 #include "GLModel.hpp"
 #include "I18N.hpp"
 
+#include <algorithm>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 #include "LibVGCode/LibVGCodeWrapper.hpp"
 // needed for tech VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+#include "libslic3r/Technologies.hpp"
+#include "libslic3r/Color.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include <cstddef>
+#include "libslic3r/Config.hpp"
+#include "libvgcode/include/GCodeInputData.hpp"
+#include <iterator>
+#include "libvgcode/include/PathVertex.hpp"
 #include <libvgcode/include/Types.hpp>
 
 #include <array>
 #include <cstdint>
 #include <float.h>
 #include <set>
+#include "slic3r/GUI/MeshUtils.hpp"
+#include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace Slic3r {
 
@@ -72,7 +86,6 @@ public:
             float m_model_z_offset{ 0.5f };
             bool m_visible{ true };
             bool m_is_dark = false;
-            bool m_fixed_screen_size{ false };
             float m_scale_factor{ 1.0f };
 #if ENABLE_ACTUAL_SPEED_DEBUG
             ActualSpeedImguiWidget m_actual_speed_imgui_widget;
@@ -154,7 +167,10 @@ public:
         GCodeWindow gcode_window;
         float m_scale = 1.0;
         bool m_show_marker = false;
-        void render(const bool has_render_path, float legend_height, const libvgcode::Viewer* viewer, uint32_t gcode_id, int canvas_width, int canvas_height, int right_margin, const libvgcode::EViewType& view_type);
+        // The tool marker at the current move, drawn in 3D.
+        void render_marker(const bool has_render_path, int canvas_width, int canvas_height, const libvgcode::EViewType& view_type);
+        // The marker's position window and the G-code window, both ImGui.
+        void render_overlay(const bool has_render_path, float legend_height, const libvgcode::Viewer* viewer, uint32_t gcode_id, int canvas_width, int canvas_height, int right_margin, const libvgcode::EViewType& view_type);
     };
     struct ExtruderFilament
     {
@@ -183,6 +199,10 @@ private:
     std::vector<int> m_plater_extruder;
     bool m_gl_data_initialized{ false };
     unsigned int m_last_result_id{ 0 };
+    // Belt printers: the view the loaded result was converted for (see load_as_gcode).
+    bool m_last_belt_show_designed{ true };
+    // Belt printers: the print Z of each viewer layer, in the viewer's layer numbering.
+    std::vector<double> m_belt_layer_zs;
     //BBS: save m_gcode_result as well
     const GCodeProcessorResult* m_gcode_result;
     std::array<unsigned int, static_cast<size_t>(EMoveType::Count)> m_move_type_counts{};
@@ -203,6 +223,7 @@ private:
     //BBS: add shell bounding box
     BoundingBoxf3 m_shell_bounding_box;
     float m_max_print_height{ 0.0f };
+    bool  m_machine_frame_transform_active{ false };
     float m_z_offset{ 0.0f };
 
     ConfigOptionMode m_user_mode;
@@ -226,7 +247,8 @@ private:
     std::vector<libvgcode::EViewType> view_type_items;
     std::vector<std::string> view_type_items_str;
     int       m_view_type_sel = 0;
-    int       m_last_extruder_count_default_applied{0};  // 0=unset, 1=single, 2+=multi
+    // ORCA: which default view type was last applied, see apply_default_view_type(). Empty until the first one is applied.
+    std::string m_applied_default_view_type_key;
     std::vector<EMoveType> options_items;
 
     bool m_legend_visible{ true };
@@ -243,7 +265,14 @@ private:
 mutable bool m_no_render_path { false };
     bool m_is_dark = false;
 
+    bool  m_belt_view_enabled = false;
+    bool  m_belt_show_designed = true;   // Designed (upright, back-transformed) view by default; off shows
+                                         // the raw machine-frame G-code (canvas view menu, hotkey B).
+    float m_belt_angle_deg = 0.f;
+
     libvgcode::Viewer m_viewer;
+    // ORCA: section view, as the viewer has it. What it cuts away casts no shadow.
+    std::array<float, 4> m_clipping_plane{ 0.0f, 0.0f, 0.0f, 1.0f };
     bool m_loaded_as_preview{ false };
 
 public:
@@ -273,7 +302,20 @@ public:
     //BBS: add all plates filament statistics
     void render_all_plates_stats(const std::vector<const GCodeProcessorResult*>& gcode_result_list, bool show = true) const;
     //BBS: GUI refactor: add canvas width and height
-    void render(int canvas_width, int canvas_height, int right_margin);
+    // Shells, toolpaths and the sequential marker, drawn in 3D.
+    void render_scene(int canvas_width, int canvas_height);
+    // Legend, sliders, the marker's position window and the G-code window, all ImGui.
+    void render_overlay(int canvas_width, int canvas_height, int right_margin);
+    // ORCA: realistic view. Depth-only pass drawing the toolpaths as the light sees them, into
+    // the shadow map the caller has bound, and the map they sample back in render_scene.
+    void render_shadow_casters(const Transform3d& light_view_matrix, const Transform3d& light_projection_matrix, const Vec3d& light_position);
+    void set_shadow_map(int texture_unit, const Transform3d& light_view_projection, float intensity, float texel_size);
+    // ORCA: tone applied to the shaded toolpaths, paying back the light the lighting term,
+    // the shadow and the SSAO pass each take off. 1.0/1.0 is a no-op.
+    void set_tone(float exposure, float saturation);
+    // ORCA: section view
+    void set_clipping_plane(const ClippingPlane& plane);
+    void set_light_top_dir(const Vec3d& direction);
     //BBS
     // void _render_calibration_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, OpenGLManager& opengl_manager);
     // void _render_calibration_thumbnail_framebuffer(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, OpenGLManager& opengl_manager);
@@ -284,10 +326,15 @@ public:
     std::vector<int> get_plater_extruder();
 
     const float                get_max_print_height() const { return m_max_print_height; }
+    bool                       is_machine_frame_transform_active() const { return m_machine_frame_transform_active; }
     const BoundingBoxf3& get_paths_bounding_box() const { return m_paths_bounding_box; }
     const BoundingBoxf3& get_max_bounding_box() const { return m_max_bounding_box; }
     const BoundingBoxf3& get_shell_bounding_box() const { return m_shell_bounding_box; }
     std::vector<double> get_layers_zs() const {
+        // Belt printers: the layer Z the slider labels and the colour-change ticks
+        // use is the layer's print Z (see load_as_gcode), not a toolpath height.
+        if (! m_belt_layer_zs.empty())
+            return m_belt_layer_zs;
         const std::vector<float> zs = m_viewer.get_layers_zs();
         std::vector<double> ret;
         std::transform(zs.begin(), zs.end(), std::back_inserter(ret), [](float z) { return static_cast<double>(z); });
@@ -296,6 +343,10 @@ public:
     std::vector<float> get_layers_times() const { return m_viewer.get_layers_estimated_times(); }
 
     const std::array<size_t,2> &get_layers_z_range() const { return m_viewer.get_layers_view_range(); }
+    size_t get_vertices_count() const { return m_viewer.get_vertices_count(); }
+    size_t get_layers_count() const { return m_viewer.get_layers_count(); }
+    // ORCA: realistic view. Changes whenever the toolpaths casting shadows do.
+    size_t shadow_casters_signature() const;
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
     void update_sequential_view_current(unsigned int first, unsigned int last);
@@ -319,6 +370,16 @@ public:
     void set_view_type(libvgcode::EViewType type) {
         m_viewer.set_view_type(type);
     }
+    // ORCA: select a view type in the preview combo box and apply it
+    void select_view_type(libvgcode::EViewType type);
+    // ORCA: apply the "preview_default_view_type" preference, see the definition for the supported values
+    void apply_default_view_type();
+
+    // ORCA: stable, locale independent name of a view type, as stored in the application config
+    static std::string view_type_to_config_name(libvgcode::EViewType type);
+    static bool view_type_from_config_name(const std::string& name, libvgcode::EViewType& type);
+    // ORCA: (config value, translated label) pairs for the "preview_default_view_type" preference combo box
+    static std::vector<std::pair<std::string, std::string>> default_view_type_choices();
     void reset_visible(libvgcode::EViewType type) {
         if (type == libvgcode::EViewType::FeatureType) {
             auto roles = m_viewer.get_extrusion_roles();
@@ -333,6 +394,13 @@ public:
 
     libvgcode::EViewType get_view_type() const { return m_viewer.get_view_type(); }
 
+    // ORCA: darken the layers not scrubbed to while using the preview layer slider
+    void set_dim_previous_layers(bool value) { m_viewer.set_dim_previous_layers(value); }
+    bool is_dim_previous_layers() const { return m_viewer.is_dim_previous_layers(); }
+    // ORCA: brightness of those darkened layers, 1.0 = unchanged, 0.0 = black
+    void set_dim_previous_layers_brightness(float value) { m_viewer.set_dim_previous_layers_brightness(value); }
+    float get_dim_previous_layers_brightness() const { return m_viewer.get_dim_previous_layers_brightness(); }
+
     void set_layers_z_range(const std::array<unsigned int, 2>& layers_z_range);
 
     bool is_legend_shown() const { return m_legend_visible && m_legend_enabled; }
@@ -341,6 +409,11 @@ public:
     float get_legend_height() { return m_legend_height; }
 
     void export_toolpaths_to_obj(const char* filename) const;
+
+    void set_belt_printer(bool enabled, float angle_deg) { m_belt_view_enabled = enabled; m_belt_angle_deg = angle_deg; }
+    bool is_belt_view() const { return m_belt_view_enabled && m_belt_angle_deg > 0.f; }
+    void toggle_belt_show_designed() { if (m_belt_view_enabled) m_belt_show_designed = !m_belt_show_designed; }
+    bool is_belt_show_designed() const { return m_belt_show_designed; }
 
     size_t get_extruders_count() { return m_extruders_count; }
     void push_combo_style();
@@ -356,6 +429,8 @@ public:
 private:
     //BBS: always load shell at preview
     //void load_shells(const Print& print);
+    // Canvas height minus the room the horizontal slider takes.
+    int sequential_view_height(int canvas_height) const;
     void render_toolpaths();
     void render_shells(int canvas_width, int canvas_height);
 

@@ -5,6 +5,8 @@
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
 
+#include <clipper2/clipper.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -266,8 +268,8 @@ std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool ma
 }
 
 // Sweeps every outer contour of `src` along the straight segment from (0,0) to `delta` (scaled mm,
-// u/w plane) via Clipper's Minkowski sum (ClipperLib::MinkowskiSum, vendored in
-// deps_src/clipper/clipper.hpp), unioning the per-contour results together. Used for both the +u
+// u/w plane) via Clipper2's Minkowski sum (Clipper2Lib::MinkowskiSum, vendored in
+// deps_src/clipper2), unioning the per-contour results together. Used for both the +u
 // "shadow" sweep and the downward "fill to bed" sweep of generate_one_fin() -- same primitive,
 // different delta.
 //
@@ -280,13 +282,19 @@ std::optional<double> contour_u_at(const ExPolygons& section, coord_t w, bool ma
 // so holes can't create fin material where none should be.
 ExPolygons sweep_ex(const ExPolygons& src, const Point& delta)
 {
-    ClipperLib::Path pattern{Point(0, 0), delta};
-    Polygons         out;
+    const Clipper2Lib::Path64 pattern{{0, 0}, {delta.x(), delta.y()}};
+    Polygons                  out;
     for (const ExPolygon& ep : src) {
-        ClipperLib::Paths solution;
-        ClipperLib::MinkowskiSum(pattern, ep.contour.points, solution, /*pathIsClosed=*/true);
-        for (const ClipperLib::Path& p : solution)
-            out.emplace_back(p);
+        Clipper2Lib::Path64 contour;
+        contour.reserve(ep.contour.points.size());
+        for (const Point& pt : ep.contour.points)
+            contour.emplace_back(pt.x(), pt.y());
+        for (const Clipper2Lib::Path64& p : Clipper2Lib::MinkowskiSum(pattern, contour, /*isClosed=*/true)) {
+            Polygon& poly = out.emplace_back();
+            poly.points.reserve(p.size());
+            for (const Clipper2Lib::Point64& pt : p)
+                poly.points.emplace_back(pt.x, pt.y);
+        }
     }
     return union_ex(out);
 }
