@@ -126,6 +126,8 @@ public:
     GLGizmoFin(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
 
     bool on_mouse(const wxMouseEvent& mouse_event) override;
+    // The hovered scene ghost is drawn highlighted, so the scene cache must not be reused.
+    bool render_follows_cursor() const override;
     void data_changed(bool is_serializing) override;
 
     FinGhostRef selected_fin_ref() const;

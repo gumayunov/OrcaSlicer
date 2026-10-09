@@ -280,6 +280,11 @@ bool GLGizmoFin::on_mouse(const wxMouseEvent& mouse_event)
     return false;
 }
 
+bool GLGizmoFin::render_follows_cursor() const
+{
+    return m_parent.fin_ghosts().hovered().valid();
+}
+
 // Raycast the scene ghosts under the cursor and push the hover descriptor into the
 // renderer (it draws the hovered ghost highlighted). One raycast sweep per mouse move,
 // only while this gizmo is active; each ghost is AABB-pruned inside MeshRaycaster, and

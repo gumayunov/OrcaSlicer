@@ -97,6 +97,7 @@ public:
     // update_ghost_hover() on mouse moves, cleared by GLCanvas3D whenever the Fin
     // gizmo is not active.
     void set_hovered(const FinGhostRef& hovered) { m_hovered = hovered; }
+    const FinGhostRef& hovered() const { return m_hovered; }
 
     // Closest ghost under the mouse ray, or nullopt. Skips the selected fin (not drawn =>
     // not pickable). Raycasts every cached ghost with the exact model matrix it was drawn
