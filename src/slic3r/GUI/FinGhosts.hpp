@@ -144,6 +144,7 @@ private:
         std::chrono::steady_clock::time_point last_regen{};         // epoch => "never" => first regen is immediate
         bool generated{ false };                                    // false until the first regeneration ran
         bool visited{ false };                                      // per-frame GC mark
+        bool hidden{ false };                                       // instance is on a hidden plate: not drawn, not pickable
     };
 
     void regenerate(Entry& entry, const ModelObject& object, const Transform3d& to_bed);

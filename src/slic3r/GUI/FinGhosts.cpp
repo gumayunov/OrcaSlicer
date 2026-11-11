@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 
 namespace Slic3r {
 namespace GUI {
@@ -148,10 +149,15 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
     // Live per-instance world transforms (see the header comment): first GLVolume of an
     // (object, instance) pair wins -- all of an instance's volumes share the instance trafo.
     std::map<std::pair<int, int>, Transform3d> live_trafos;
+    // Instances on a plate the canvas currently hides: no ghost, like the object itself.
+    std::set<std::pair<int, int>> hidden_instances;
     for (const GLVolume* v : volumes.volumes)
-        if (v != nullptr)
+        if (v != nullptr) {
             live_trafos.emplace(std::make_pair(v->object_idx(), v->instance_idx()),
                                 v->get_instance_transformation().get_matrix());
+            if (v->on_hidden_plate)
+                hidden_instances.emplace(v->object_idx(), v->instance_idx());
+        }
 
     bool params_refreshed = false; // at most one preset refresh per render() call
 
@@ -187,6 +193,9 @@ void FinGhostsRenderer::render(const Model& model, const GLVolumeCollection& vol
             const ModelInstance* instance = mo->instances[instance_idx];
             Entry& entry  = m_entries[{ mo->id().id, instance->id().id }];
             entry.visited = true;
+            entry.hidden  = hidden_instances.count({ object_idx, instance_idx }) != 0;
+            if (entry.hidden)
+                continue;
 
             const auto        live   = live_trafos.find({ object_idx, instance_idx });
             const Transform3d to_bed = live != live_trafos.end() ? live->second : instance->get_matrix();
@@ -284,8 +293,8 @@ std::optional<FinPick> FinGhostsRenderer::pick(const Vec2d& mouse_pos, const Cam
     std::optional<FinPick> best;
     double                 best_dist_sq = std::numeric_limits<double>::max();
     for (const auto& [key, entry] : m_entries) {
-        if (!entry.generated)
-            continue;
+        if (!entry.generated || entry.hidden)
+            continue; // not drawn => not pickable
         const auto oi = object_idx_by_id.find(key.first);
         const auto ii = instance_idx_by_id.find(key);
         if (oi == object_idx_by_id.end() || ii == instance_idx_by_id.end())
