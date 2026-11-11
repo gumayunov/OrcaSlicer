@@ -70,6 +70,8 @@ If you come across any of these in search results, please <b>report them</b> as 
   Supports a broad range of printers: Bambu Lab, Prusa, Creality, Voron, and more.
 - **[Belt Printer Support](https://www.orcaslicer.com/wiki/belt_printing)**  
   Slice for belt / conveyor (infinite-Z) printers, with belt-aware supports and a tilted-bed preview. Contributed by [Joseph Robertson (@HarrierPigeon)](https://github.com/HarrierPigeon).
+- **[IDEX/IQEX Parallel Printing Support](https://www.orcaslicer.com/wiki/idex_iqex_parallel_printing)**  
+  Print copies or mirror images of a part on every carriage of an IDEX or IQEX printer at once, with the mode chosen per plate and nozzle clearance zones shown on the bed. Contributed by [Clifford (@cgarwood82)](https://github.com/cgarwood82).
 - Additional features can be found in the [change notes](https://github.com/OrcaSlicer/OrcaSlicer/releases/).
 
 # Wiki
@@ -84,7 +86,8 @@ The [wiki](https://www.orcaslicer.com/wiki) aims to provide a detailed explanati
 ## Stable Release
 
 📥 **[Download the Latest Stable Release](https://github.com/OrcaSlicer/OrcaSlicer/releases/latest)**  
-Visit our GitHub Releases page for the latest stable version of OrcaSlicer, recommended for most users.
+Visit our GitHub Releases page for the latest stable version of OrcaSlicer, recommended for most users.  
+Windows and macOS release and nightly builds are code signed.
 
 ## Nightly Builds
 

@@ -2,6 +2,9 @@
 #define slic3r_GLCanvas3D_hpp_
 
 #include "libslic3r/Point.hpp"
+#include "libslic3r/ConnectedBodies.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include <cstdlib>
 #include <imgui.h>
@@ -30,11 +33,13 @@
 #include "Gizmos/GLGizmosManager.hpp"
 #include "GUI_ObjectLayers.hpp"
 #include "GLSelectionRectangle.hpp"
+#include "GLModel.hpp"
 #include "MeshUtils.hpp"
 #include "GCodeViewer.hpp"
 #include "Camera.hpp"
 #include "SceneRaycaster.hpp"
 #include "SceneCache.hpp"
+#include "SelectionOutline.hpp"
 #include "FrameProfiler.hpp"
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
@@ -376,6 +381,8 @@ class GLCanvas3D
         bool ignore_left_up{ false };
         Drag drag;
         bool ignore_right_up;
+        // ORCA a button was pressed on toolbar empty areas, swallow events until it is released
+        bool down_on_toolbar{ false };
 
         // Orca: The screen-space start and world-space anchor describe the same pan session.
         // Invalidating one must invalidate the other so a new drag cannot reuse stale depth.
@@ -478,6 +485,77 @@ class GLCanvas3D
         void render(const std::vector<const ModelInstance*>& sorted_instances) const;
     };
 
+    class CenterOfMass
+    {
+        using Sum = GCodeProcessorResult::ObjectMass::Sum;
+        enum MarkerKind : size_t { mkPlate, mkObject, mkSupport, mkBody, mkCount };
+        // A marker's mass and the box of what it stands for.
+        struct Marker
+        {
+            Sum           sum;
+            BoundingBoxf3 box;
+            // Of an object, whether it is an assembly.
+            bool assembly{ false };
+
+            Vec3d center() const { return sum.moment / sum.mass; }
+        };
+        // The plates', each object instance's, its supports' and each body of an assembly's.
+        using Markers = std::array<std::vector<Marker>, mkCount>;
+
+        // The marker's two colors of alternating octants.
+        std::array<GLModel, 2> m_octants;
+        // Mass properties at unit density of each ModelVolume's mesh, by ModelVolume id, which a new mesh changes.
+        std::map<size_t, MassProperties> m_meshes;
+        // The connected bodies of each assembly in its own coordinates, by ModelObject id, with the volumes they were sliced from.
+        struct Bodies
+        {
+            struct Volume
+            {
+                size_t      id;
+                bool        negative;
+                double      density;
+                Transform3d trafo;
+
+                bool operator==(const Volume& other) const
+                {
+                    return id == other.id && negative == other.negative && density == other.density && trafo.matrix() == other.trafo.matrix();
+                }
+            };
+            std::vector<Volume>    volumes;
+            size_t                 slabs{ 0 };
+            std::vector<SolidBody> bodies;
+        };
+        std::map<size_t, Bodies> m_bodies;
+        // The markers drawn last: of the finished print and, in Preview, of what is printed up to the top layer shown.
+        std::array<Markers, 2> m_drawn;
+        size_t                 m_top_layer{ 0 };
+        // The marker whose details are shown, with the number of its kind then.
+        struct Pick
+        {
+            size_t set;
+            size_t kind;
+            size_t index;
+            size_t count;
+        };
+        std::optional<Pick> m_picked;
+
+        Markers model_markers(const GLCanvas3D& canvas);
+
+    public:
+        void render(GLCanvas3D& canvas);
+        // Shows the details of the marker under the mouse, else hides them; whether it hit one.
+        bool on_left_down(GLCanvas3D& canvas, const Vec2d& mouse);
+        void render_details(GLCanvas3D& canvas);
+        // Whether the mouse is over the details.
+        bool details_hovered() const;
+        // Whether the details cover a point, also when ImGui has not seen the mouse move there.
+        bool details_contain(const Vec2d& point) const;
+        // Whether a button held down was pressed on the details, off their close button.
+        bool details_pressed() const;
+        // Whether there were details to hide.
+        bool hide_details(GLCanvas3D& canvas);
+    };
+
     class Tooltip
     {
         std::string m_text;
@@ -577,6 +655,8 @@ private:
 #endif
     unsigned int m_last_w, m_last_h;
     bool m_in_render;
+    // How many canvases are inside _render_frame() right now - see is_frame_in_progress().
+    static int s_frames_in_progress;
     wxTimer m_timer;
     wxTimer m_timer_set_color;
     // Armed by each frame that draws the FPS overlay; its tick requests an overlay-only frame.
@@ -592,6 +672,10 @@ private:
     mutable GLToolbar m_main_toolbar;
     mutable GLToolbar m_separator_toolbar;
     mutable IMToolbar m_sel_plate_toolbar;
+    // Thumbnails of the plate switcher (Focus mode), refreshed when the plater's version changes.
+    std::vector<std::unique_ptr<IMToolbarItem>> m_plate_switcher_items;
+    unsigned m_plate_switcher_version{ unsigned(-1) };
+    bool     m_plate_switcher_scrollbar{ false };
     mutable GLToolbar m_assemble_view_toolbar;
     mutable IMReturnToolbar m_return_toolbar;
     mutable Vec2i32 m_canvas_toolbar_pos = {140, 5};
@@ -641,6 +725,7 @@ private:
         double ratio{ 0. }; // 0 = off
         double last_ratio{ 0. }; // before it was switched off
         Vec3d  normal{ Vec3d::Zero() }; // zero until first aimed
+        bool   follow_camera{ false };
         bool   panel_open{ false };
         const GLCanvas3D* owner; // whose objects place the plane
     };
@@ -706,10 +791,21 @@ private:
     ECursorType m_cursor_type;
     GLSelectionRectangle m_rectangle_selection;
     bool m_navigator_dragging{ false };
+    // whether a click on the navigator is still turning the camera, over the frames that follow it
+    bool m_navigator_animating{ false };
+    // until when a wheel step keeps the preview's reduced set drawn
+    std::chrono::time_point<std::chrono::steady_clock> m_preview_interaction_until{};
+    // whether the frame that restores the toolpaths once that time is up is still owed
+    bool m_preview_settle_pending{ false };
 
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
     std::vector<int> m_hover_plate_idxs;
+    // Some volume or plate raycaster may still be hidden with the inactive plates.
+    bool m_inactive_plates_hidden{ false };
+    // IMEX ghost hover state (plate-owned transparent ghost volumes).
+    int m_hover_ghost_head  { -1 };  // physical head index, -1 when not hovering a ghost
+    int m_hover_ghost_plate { -1 };  // plate index for the hovered ghost, -1 when none
     //BBS if explosion_ratio is changed, need to update volume bounding box
     mutable float m_explosion_ratio = 1.0;
     mutable Vec3d m_rotation_center{ 0.0, 0.0, 0.0};
@@ -734,6 +830,7 @@ private:
     int m_selected_extruder;
 
     Labels m_labels;
+    CenterOfMass m_center_of_mass;
     Tooltip m_tooltip;
     bool m_tooltip_enabled{ true };
     Slope m_slope;
@@ -849,6 +946,9 @@ public:
     std::array<unsigned int, 2> m_ssao_texture_size{ { 0, 0 } };
     // The last scene pass, for frames that only rebuild the overlay.
     SceneCache m_scene_cache;
+    SelectionOutline m_selection_outline;
+    // Volumes the object passes of this frame drew and collected for outlining after them.
+    std::vector<GLVolume*> m_outlined_volumes;
     // Signature of the overlay on screen; empty after render(), a paint request or a frame drawn but
     // not shown, so the next frame is presented regardless.
     std::optional<size_t> m_presented_signature;
@@ -905,6 +1005,11 @@ public:
     void on_change_color_mode(bool is_dark, bool reinit = true);
     const bool get_dark_mode_status() { return m_is_dark; }
     void set_as_dirty() { m_dirty = true; }
+    // True while any GLCanvas3D is inside _render_frame(). The other surfaces that share the app's one
+    // GL context (the UV editor canvas) check this before making themselves current: a frame interrupted
+    // by another surface finishes drawing into that surface and then presents a window the context no
+    // longer belongs to, which on Mesa/X11 is a fatal X error (BadMatch) rather than a no-op.
+    static bool is_frame_in_progress() { return s_frames_in_progress > 0; }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const { return (unsigned int)m_volumes.volumes.size(); }
@@ -1054,6 +1159,9 @@ public:
     void select_plate();
     //BBS: GUI refactor: GLToolbar&&gizmo
     int get_main_toolbar_offset() const;
+    // ORCA the top toolbar row: main toolbar, separator, gizmo bar and assemble view toolbar (not the collapse toolbar)
+    float get_top_toolbar_width() const;
+    float get_top_toolbar_height() const;
     int get_main_toolbar_height() const { return m_main_toolbar.get_height(); }
     int get_main_toolbar_width() const { return m_main_toolbar.get_width(); }
     float get_assemble_view_toolbar_width() const { return m_assemble_view_toolbar.get_width(); }
@@ -1195,6 +1303,8 @@ public:
     void on_idle(wxIdleEvent& evt);
     void on_char(wxKeyEvent& evt);
     void on_key(wxKeyEvent& evt);
+    // Sends a key-up for each modifier still held, whose own key-up is sent to the window that takes the focus.
+    void release_held_modifiers();
     // Runs the Plater/Preview shortcut bound to chord, swallowing auto-repeats of one-shot
     // shortcuts; false when nothing is bound.
     bool handle_shortcut(const KeyChord& chord);
@@ -1231,7 +1341,7 @@ public:
     void set_tooltip(const std::string& tooltip);
 
     // the following methods add a snapshot to the undo/redo stack, unless the given string is empty
-    void do_move(const std::string& snapshot_type);
+    void do_move(const std::string& snapshot_type, bool force_volume_move = false);
     void do_rotate(const std::string& snapshot_type);
     void do_scale(const std::string& snapshot_type);
     void do_center();
@@ -1249,6 +1359,8 @@ public:
 
     int get_move_volume_id() const { return m_mouse.drag.move_volume_idx; }
     int get_first_hover_volume_idx() const { return m_hover_volume_idxs.empty() ? -1 : m_hover_volume_idxs.front(); }
+    int get_hover_ghost_head()  const { return m_hover_ghost_head; }
+    int get_hover_ghost_plate() const { return m_hover_ghost_plate; }
     void set_selected_extruder(int extruder) { m_selected_extruder = extruder;}
 
     class WipeTowerInfo {
@@ -1299,6 +1411,8 @@ public:
     void msw_rescale() { m_gcode_viewer.invalidate_legend(); }
 
     void request_extra_frame() { m_extra_frame_requested = true; }
+    // whether the user is holding the camera, the navigator, a gizmo, the rectangle selection or a preview slider
+    bool is_user_interacting() const;
 
     void schedule_extra_frame(int milliseconds);
 
@@ -1416,6 +1530,8 @@ private:
 
     void _picking_pass();
     void _rectangular_selection_picking_pass();
+    // IMEX ghost picking (ray vs. ghost bbox). Runs at the end of _picking_pass.
+    void _picking_pass_imex_ghosts();
     bool _is_fxaa_enabled() const;
     bool _is_realistic_view_enabled() const;
     bool _is_ssao_enabled() const;
@@ -1449,6 +1565,9 @@ private:
     void _render_shadows(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     //BBS: add part plate related logic
     void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
+    bool _hides_inactive_plates() const;
+    // Returns whether what the scene shows changed.
+    bool _update_inactive_plates_visibility();
     // The current plate's box (XY, at z = 0); in the Design tab, its own bed's.
     BoundingBoxf3 _current_plate_box() const;
     // Design tab: draw the CAD grid (minor 10 mm + major 50 mm) in place of the plate's
@@ -1457,13 +1576,29 @@ private:
     void _render_cad_grid(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
+    // IMEX ghost volumes owned by PartPlate, drawn through the shader the caller bound:
+    // the shaded pass's transparent half, or the X-Ray pass below.
+    void _render_imex_ghosts(bool xray_pass = false);
+    void _render_imex_ghosts_xray();
+    // IMEX ghost hover tooltip: filament swatch + label drawn as an ImGui overlay.
+    void _render_imex_ghost_tooltip();
     void _render_section_view_caps();
+    void _render_selection_outline();
     void _render_wireframe_overlay();
+    bool _is_below_plate_view_active() const;
+    void _render_below_plate_volumes();
     bool _is_xray_view_active() const;
     void _render_xray_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
+    // The translucent toolpaths, after the occlusion pass, which would shade them as the surface behind them.
+    void _render_gcode_translucent(int canvas_width, int canvas_height);
+    // Realistic view: binds, or unbinds, the shadow map the toolpaths read on texture unit 4. False without a map.
+    bool _bind_gcode_shadow_map(bool bind) const;
     void _render_gcode_overlay(int canvas_width, int canvas_height);
+    // decides whether the preview draws its reduced set this frame and returns whether what the scene
+    // pass draws changed; runs before the cached scene is consulted
+    bool _update_preview_interaction();
     //BBS: render a plane for assemble
     void _render_plane() const;
     void _render_selection();
@@ -1482,12 +1617,15 @@ private:
     void _render_gizmos_overlay();
     void _render_main_toolbar();
     void _render_imgui_select_plate_toolbar();
+    // Prepare: picks the plate to show while the inactive ones are hidden.
+    void _render_plate_switcher();
     void _render_assemble_view_toolbar() const;
     void _render_return_toolbar() const;
     void _render_canvas_toolbar();
     void _render_section_view_panel(const ImVec2& bottom_left);
     void _render_separator_toolbar_right() const;
     void _render_separator_toolbar_left() const;
+    bool _is_mouse_over_top_toolbar(const Vec2d& mouse_pos) const;
     void _render_collapse_toolbar() const;
     // BBS
     //void _render_view_toolbar() const;

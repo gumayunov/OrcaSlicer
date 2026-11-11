@@ -77,6 +77,7 @@ class Preset;
 class BBLProject;
 
 class KeyStore;
+struct MeshRepairStats;
 
 namespace UndoRedo {
 	class StackImpl;
@@ -433,6 +434,12 @@ public:
     LayerHeightProfile      layer_height_profile;
     // Whether or not this object is printable
     bool                    printable { true };
+    // Whether this object is snapped to the build plate after transformations.
+    // Instance Z offsets are shared by all instances of an object.
+    bool                    auto_drop { true };
+    // Single-object import keeps named bodies internally until the user reveals its parts.
+    // A stored choice: part settings or painting still show the parts, see hides_imported_parts().
+    bool                    imported_parts_hidden { false };
 
     // This vector holds position of selected support points for SLA. The data are
     // saved in mesh coordinates to allow using them for several instances.
@@ -490,6 +497,11 @@ public:
     bool                    is_mm_painted() const;
     // Checks if any of object volume is painted using the fuzzy skin painting gizmo.
     bool                    is_fuzzy_skin_painted() const;
+    // Whether a part has settings or painting of its own; a part that only repeats the object's filament has none.
+    bool                    has_individual_part_settings() const;
+    // Whether the object list shows a single-object import without its parts. Never true while
+    // a part has its own settings or painting, so effective per-part controls stay visible.
+    bool                    hides_imported_parts() const;
     // This object may have a varying layer height by painting or by a table.
     // Even if true is returned, the layer height profile may be "flat" with no difference to default layering.
     bool                    has_custom_layering() const
@@ -741,8 +753,8 @@ private:
         Internal::StaticSerializationWrapper<ModelConfigObject const> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid,
+            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, imported_parts_hidden, origin_translation, brim_points,
+            m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
             cut_connectors, cut_id, fins);
@@ -754,8 +766,8 @@ private:
         // BBS: add backup, check modify
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid,
+            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, imported_parts_hidden, origin_translation, brim_points,
+            m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
             cut_connectors, cut_id, fins);
@@ -864,6 +876,8 @@ class ModelVolume final : public ObjectBase
 {
 public:
     std::string         name;
+    // Session-only tree position; snapshots preserve it without changing project file order.
+    int                 import_display_order { -1 };
     // struct used by reload from disk command to recover data from disk
     struct Source
     {
@@ -923,13 +937,13 @@ public:
     // The triangular model.
     const TriangleMesh& mesh() const { return *m_mesh.get(); }
     std::shared_ptr<const TriangleMesh> mesh_ptr() const { return m_mesh; }
-    void                set_mesh(const TriangleMesh &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); }
-    void                set_mesh(TriangleMesh &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); }
-    void                set_mesh(const indexed_triangle_set &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); }
-    void                set_mesh(indexed_triangle_set &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); }
-    void                set_mesh(std::shared_ptr<const TriangleMesh> &mesh) { m_mesh = mesh; }
-    void                set_mesh(std::unique_ptr<const TriangleMesh> &&mesh) { m_mesh = std::move(mesh); }
-	void				reset_mesh() { m_mesh = std::make_shared<const TriangleMesh>(); }
+    void                set_mesh(const TriangleMesh &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); m_is_splittable = -1; }
+    void                set_mesh(TriangleMesh &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); m_is_splittable = -1; }
+    void                set_mesh(const indexed_triangle_set &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); m_is_splittable = -1; }
+    void                set_mesh(indexed_triangle_set &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); m_is_splittable = -1; }
+    void                set_mesh(std::shared_ptr<const TriangleMesh> &mesh) { m_mesh = mesh; m_is_splittable = -1; }
+    void                set_mesh(std::unique_ptr<const TriangleMesh> &&mesh) { m_mesh = std::move(mesh); m_is_splittable = -1; }
+	void				reset_mesh() { m_mesh = std::make_shared<const TriangleMesh>(); m_is_splittable = -1; }
     const std::shared_ptr<const TriangleMesh>& get_mesh_shared_ptr() const { return m_mesh; }
     // Configuration parameters specific to an object model geometry or a modifier volume, 
     // overriding the global Slic3r settings and the ModelObject settings.
@@ -1010,6 +1024,26 @@ public:
     // they are not a property of any single layer.
     TextureDisplacementOptions texture_displacement_options;
 
+    // The model's own texture coordinates, as the file it was imported from carried them: three per
+    // triangle of mesh().its, in its triangle order (corner k of triangle i at 3i+k), V already
+    // flipped to the sampling convention (V = 0 is the image's top row). Empty when the source had
+    // none, which is every STL and every 3mf - only a textured OBJ brings one in today.
+    //
+    // Per corner rather than per vertex because that is what a UV layout is: the two sides of a seam
+    // are the same vertex with two different coordinates, and collapsing them would smear the texture
+    // across every island boundary. TextureProjectionMethod::ModelUV maps through it, which is what
+    // lets a model that already carries a UV channel be textured on the artist's own layout instead
+    // of on a fresh unwrap.
+    //
+    // Indexed by triangle, so anything that *replaces* the mesh has to bring it across (or drop it):
+    // see transfer_uv_channel(), and reset_texture_uv() for the cases that cannot.
+    std::vector<Vec2f> texture_uv;
+
+    bool has_texture_uv() const { return !texture_uv.empty() && texture_uv.size() == mesh().its.indices.size() * 3; }
+    // Forgets the channel. For a mesh change that nothing can carry it across - a split, a boolean -
+    // where leaving it would map the texture by another mesh's triangle numbering.
+    void reset_texture_uv() { texture_uv.clear(); }
+
     // Save painting data before reset_extra_facets() discards it.
     // Used for replacing mesh without losing painting data.
     // Only for model parts (not modifiers/connectors).
@@ -1055,7 +1089,6 @@ public:
     void                set_material_id(t_model_material_id material_id);
     void                reset_extra_facets();
     ModelMaterial*      material() const;
-    void                set_material(t_model_material_id material_id, const ModelMaterial &material);
     // Extract the current extruder ID based on this ModelVolume's config and the parent ModelObject's config.
     // Extruder ID is only valid for FFF. Returns -1 for SLA or if the extruder ID is not applicable (support volumes).
     int                 extruder_id() const;
@@ -1079,6 +1112,9 @@ public:
     // Return the number of volumes created from this one.
     // This is useful to assign different materials to different volumes of an object.
     size_t              split(unsigned int max_extruders, bool remap_paint);
+    // Replaces the mesh by its repair_mesh() result if that changed it. False if no solid can be built.
+    bool                repair(bool keep_painting, MeshRepairStats *stats = nullptr, std::string *error = nullptr,
+                               const std::function<void(int)> &progress = {});
     void                translate(double x, double y, double z) { translate(Vec3d(x, y, z)); }
     void                translate(const Vec3d& displacement);
     void                scale(const Vec3d& scaling_factors);
@@ -1262,7 +1298,7 @@ private:
     // Copying an existing volume, therefore this volume will get a copy of the ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other) :
         ObjectBase(other),
-        name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
+        name(other.name), import_display_order(other.import_display_order), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
         fuzzy_skin_facets(other.fuzzy_skin_facets),
@@ -1272,6 +1308,7 @@ private:
         texture_displacement_facets_6(other.texture_displacement_facets_6), texture_displacement_facets_7(other.texture_displacement_facets_7),
         texture_displacement_layers(other.texture_displacement_layers),
         texture_displacement_options(other.texture_displacement_options),
+        texture_uv(other.texture_uv),
         cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid());
@@ -1294,7 +1331,7 @@ private:
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
-        name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
+        name(other.name), import_display_order(other.import_display_order), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
         cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid()); 
@@ -1351,7 +1388,7 @@ private:
         // BBS: add backup, check modify
         bool mesh_changed = false;
         auto tr = m_transformation;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, import_display_order, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
         mesh_changed |= !(tr == m_transformation);
         auto t = supported_facets.timestamp();
         cereal::load_by_value(ar, supported_facets);
@@ -1370,7 +1407,7 @@ private:
             cereal::load_by_value(ar, f);
             mesh_changed |= tf != f.timestamp();
         }
-        ar(texture_displacement_layers, texture_displacement_options);
+        ar(texture_displacement_layers, texture_displacement_options, texture_uv);
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1387,14 +1424,14 @@ private:
 	}
 	template<class Archive> void save(Archive &ar) const {
 		bool has_convex_hull = m_convex_hull.get() != nullptr;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, import_display_order, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
         cereal::save_by_value(ar, supported_facets);
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
         cereal::save_by_value(ar, fuzzy_skin_facets);
         for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
             cereal::save_by_value(ar, texture_displacement_facet(i));
-        ar(texture_displacement_layers, texture_displacement_options);
+        ar(texture_displacement_layers, texture_displacement_options, texture_uv);
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);
@@ -1438,7 +1475,6 @@ public:
     ModelInstanceEPrintVolumeState print_volume_state;
     // Whether or not this instance is printable
     bool printable;
-    bool auto_drop;
     bool use_loaded_id_for_label {false};
     int arrange_order = 0; // BBS
     size_t loaded_id = 0; // BBS
@@ -1528,6 +1564,8 @@ public:
     double get_auto_brim_width() const;
     // BBS
     Polygon convex_hull_2d();
+    bool intersects_bed_exclude_region(const BedExcludeRegion &region, indexed_triangle_set *intersection_mesh = nullptr) const;
+    bool intersects_bed_exclude_regions(const std::vector<BedExcludeRegion> &regions, indexed_triangle_set *intersection_mesh = nullptr) const;
     void invalidate_convex_hull_2d();
 
     // Getting the input polygon for arrange
@@ -1568,7 +1606,7 @@ private:
 
     // Constructor, which assigns a new unique ID.
     explicit ModelInstance(ModelObject* object)
-        : print_volume_state(ModelInstancePVS_Inside), printable(true), auto_drop(true), object(object), m_assemble_initialized(false)
+        : print_volume_state(ModelInstancePVS_Inside), printable(true), object(object), m_assemble_initialized(false)
     {
         assert(this->id().valid());
     }
@@ -1579,7 +1617,6 @@ private:
         , m_offset_to_assembly(other.m_offset_to_assembly)
         , print_volume_state(ModelInstancePVS_Inside)
         , printable(other.printable)
-        , auto_drop(other.auto_drop)
         , object(object)
         , m_assemble_initialized(false) { assert(this->id().valid() && this->id() != other.id()); }
 
@@ -1593,7 +1630,7 @@ private:
 	ModelInstance() : ObjectBase(-1), object(nullptr) { assert(this->id().invalid()); }
     // BBS. Add added members to archive.
     template<class Archive> void serialize(Archive& ar) {
-        ar(m_transformation, print_volume_state, printable, auto_drop, m_assemble_transformation, m_offset_to_assembly, m_assemble_initialized);
+        ar(m_transformation, print_volume_state, printable, m_assemble_transformation, m_offset_to_assembly, m_assemble_initialized);
     }
 };
 
@@ -1852,8 +1889,11 @@ public:
     // Croaks if the duplicated objects do not fit the print bed.
     void duplicate_objects_grid(size_t x, size_t y, coordf_t dist);
 
+    // Turns the content of a freshly read file around Z as one piece. Placed objects are centered around their own
+    // origin without moving; unplaced ones are centered in XY only, the shift recorded in origin_translation.
+    void          rotate_and_center_objects(double angle_z);
     bool 		  looks_like_multipart_object() const;
-    void 		  convert_multipart_object(unsigned int max_extruders);
+    void 		  convert_multipart_object(unsigned int max_extruders, bool preserve_volume_names = false);
     bool          looks_like_imperial_units() const;
     void          convert_from_imperial_units(bool only_small_volumes);
     bool          looks_like_saved_in_meters() const;
