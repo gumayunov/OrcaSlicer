@@ -1857,6 +1857,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
         bool model_origin_translation_differ = model_object.origin_translation != model_object_new.origin_translation;
         bool brim_points_differ = model_brim_points_data_changed(model_object, model_object_new);
+        bool fins_differ        = model_fins_data_changed(model_object, model_object_new);
         auto print_objects_range        = print_object_status_db.get_range(model_object);
         // The list actually can be empty if all instances are out of the print bed.
         //assert(print_objects_range.begin() != print_objects_range.end());
@@ -1913,6 +1914,17 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             if (brim_points_differ) {
                 model_object.brim_points = model_object_new.brim_points;
                 update_apply_status(this->invalidate_all_steps());
+            }
+            if (fins_differ) {
+                // Fins are generated straight into the sliced mesh at posSlice (see
+                // TransientFinGuard in PrintObjectSlice.cpp), so the object's own slicing
+                // step must be invalidated. Print-level invalidate_all_steps() alone is NOT
+                // enough: it leaves posSlice done and G-code re-exports from layers with
+                // the stale fin baked in. invalidate_step(posSlice) cascades to every
+                // dependent object step and to psSkirtBrim/psWipeTower/psGCodeExport.
+                model_object.fins = model_object_new.fins;
+                for (const PrintObjectStatus &print_object_status : print_objects_range)
+                    update_apply_status(print_object_status.print_object->invalidate_step(posSlice));
             }
         }
         if (! solid_or_modifier_differ) {

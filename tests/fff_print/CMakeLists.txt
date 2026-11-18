@@ -12,6 +12,7 @@ add_executable(${_TEST_NAME}_tests
 	test_exclusion_volumes.cpp
 	test_fan_mover.cpp
 	test_fill.cpp
+	test_fin_slicing.cpp
 	test_flow.cpp
 	test_gcode_processor.cpp
 	test_gcode_statistics.cpp

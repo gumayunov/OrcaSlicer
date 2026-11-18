@@ -111,6 +111,7 @@
 #include "Gizmos/GLGizmoUtils.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoFin.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
@@ -2961,6 +2962,7 @@ void GLCanvas3D::_render_scene(const Camera& camera, const Size& cnv_size)
         m_frame_profiler.mark("outline");
     }
 
+    _render_fin_ghosts();
     _render_sequential_clearance();
 #if ENABLE_RENDER_SELECTION_CENTER
     _render_selection_center();
@@ -10244,6 +10246,27 @@ void GLCanvas3D::_render_sequential_clearance()
         || can_sequential_clearance_show_in_gizmo()) {
         m_sequential_print_clearance.render();
     }
+}
+
+void GLCanvas3D::_render_fin_ghosts()
+{
+    // Prepare view only: the preview shows the fin as real toolpaths, the assemble
+    // view has no bed frame to anchor a fin to.
+    if (m_canvas_type != ECanvasType::CanvasView3D || m_model == nullptr)
+        return;
+    // While the Fin gizmo is open it draws the SELECTED fin's live (possibly uncommitted)
+    // ghost itself; the scene still renders every other fin -- they are the pick targets
+    // for ghost-click fin selection. Hover state is pushed by the gizmo on
+    // mouse moves and must not survive it.
+    FinGhostRef selected;
+    if (m_gizmos.get_current_type() == GLGizmosManager::EType::Fin) {
+        if (const auto* fin_gizmo = dynamic_cast<const GLGizmoFin*>(m_gizmos.get_current()))
+            selected = fin_gizmo->selected_fin_ref();
+    } else {
+        m_fin_ghosts.set_hovered(FinGhostRef{});
+    }
+    m_fin_ghosts.set_selected(selected);
+    m_fin_ghosts.render(*m_model, m_volumes);
 }
 
 void GLCanvas3D::_check_and_update_toolbar_icon_scale()

@@ -2,6 +2,7 @@
 #include "../Exception.hpp"
 #include "../IMEXHelpers.hpp"
 #include "../Model.hpp"
+#include "../Fin/FinGenerator.hpp"
 #include "../Preset.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
@@ -248,6 +249,7 @@ const std::string PROJECT_EMBEDDED_SLICE_PRESETS_FILE = "Metadata/process_settin
 const std::string PROJECT_EMBEDDED_FILAMENT_PRESETS_FILE = "Metadata/filament_settings_";
 const std::string PROJECT_EMBEDDED_PRINTER_PRESETS_FILE = "Metadata/machine_settings_";
 const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
+const std::string FIN_INFORMATION_FILE = "Metadata/fin_information.xml";
 
 const unsigned int AUXILIARY_STR_LEN = 12;
 const unsigned int METADATA_STR_LEN = 9;
@@ -1014,6 +1016,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         typedef std::vector<Instance> InstancesList;
         typedef std::map<int, ObjectMetadata> IdToMetadataMap;
         typedef std::map<int, CutObjectInfo>  IdToCutObjectInfoMap;
+        typedef std::map<int, FinFeatures>    IdToFinInfoMap;
         //typedef std::map<Id, Geometry> IdToGeometryMap;
         typedef std::map<int, std::vector<coordf_t>> IdToLayerHeightsProfileMap;
         typedef std::map<int, t_layer_config_ranges> IdToLayerConfigRangesMap;
@@ -1212,6 +1215,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         IdToMetadataMap m_objects_metadata;
         std::set<int>   m_items_auto_drop_off; // object ids with a build item auto_drop="0" (2.4.x layout)
         IdToCutObjectInfoMap       m_cut_object_infos;
+        IdToFinInfoMap             m_fin_infos;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToBrimPointsMap m_brim_ear_points;
@@ -1296,6 +1300,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _extract_xml_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, XML_StartElementHandler start_handler, XML_EndElementHandler end_handler);
         bool _extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_cut_information_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, ConfigSubstitutionContext &config_substitutions);
+        void _extract_fin_information_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
@@ -2067,6 +2072,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // extract object cut info
                     _extract_cut_information_from_archive(archive, stat, config_substitutions);
                 }
+                else if (boost::algorithm::iequals(name, FIN_INFORMATION_FILE)) {
+                    // extract object fin info
+                    _extract_fin_information_from_archive(archive, stat);
+                }
                 //BBS: project embedded presets
                 else if (!dont_load_config && boost::algorithm::istarts_with(name, PROJECT_EMBEDDED_PRINT_PRESETS_FILE)) {
                     // extract slic3r layer config ranges file
@@ -2338,10 +2347,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         add_error("Invalid connector is found");
                         continue;
                     }
-                    model_object->volumes[connector.volume_id]->cut_info = 
+                    model_object->volumes[connector.volume_id]->cut_info =
                         ModelVolume::CutInfo(CutConnectorType(connector.type), connector.r_tolerance, connector.h_tolerance, true);
                 }
             }
+
+            // Apply fin information for object if any was loaded
+            // m_fin_infos are indexed by a 1 based model object index.
+            IdToFinInfoMap::iterator fin_info = m_fin_infos.find(object.second + 1);
+            if (fin_info != m_fin_infos.end())
+                model_object->fins = fin_info->second;
         }
 
         // If instances contain a single volume, the volume offset should be 0,0,0
@@ -2780,6 +2795,100 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 CutObjectInfo cut_info {cut_id, connectors};
                 m_cut_object_infos.insert({ obj_idx, cut_info });
+            }
+        }
+    }
+
+    void _BBS_3MF_Importer::_extract_fin_information_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
+    {
+        if (stat.m_uncomp_size > 0) {
+            std::string buffer((size_t)stat.m_uncomp_size, 0);
+            mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void *) buffer.data(), (size_t) stat.m_uncomp_size, 0);
+            if (res == 0) {
+                add_error("Error while reading fin information data to buffer");
+                return;
+            }
+
+            std::istringstream iss(buffer); // wrap returned xml to istringstream
+            pt::ptree fins_tree;
+            try {
+                pt::read_xml(iss, fins_tree);
+            } catch (const std::exception& e) {
+                // Corrupt/truncated fin_information.xml must not abort the WHOLE project load.
+                // Other pt::read_xml() call sites in this file share the same risk, but hardening
+                // them is a cross-cutting change out of this feature's scope -- only the fin
+                // extractor is guarded here. Skip fins gracefully; the rest of the project
+                // (model, other metadata) still loads.
+                BOOST_LOG_TRIVIAL(warning) << "_BBS_3MF_Importer: failed to parse " << FIN_INFORMATION_FILE
+                                            << ": " << e.what() << " -- skipping fins";
+                return;
+            }
+
+            boost::optional<pt::ptree&> objects_tree = fins_tree.get_child_optional("fins");
+            if (!objects_tree)
+                return;
+
+            for (const auto& object : *objects_tree) {
+                if (object.first != "object")
+                    continue;
+                pt::ptree object_tree = object.second;
+                int obj_idx = object_tree.get<int>("<xmlattr>.id", -1);
+                if (obj_idx <= 0) {
+                    add_error("Found invalid object id in fin information");
+                    continue;
+                }
+
+                IdToFinInfoMap::iterator object_item = m_fin_infos.find(obj_idx);
+                if (object_item != m_fin_infos.end()) {
+                    add_error("Found duplicated fin_object_id");
+                    continue;
+                }
+
+                FinFeatures fins;
+                for (const auto& fin_node : object_tree) {
+                    if (fin_node.first != "fin")
+                        continue;
+                    pt::ptree fin_tree = fin_node.second;
+                    FinFeature f; // defaults kept for any missing attribute
+                    if (fin_tree.get_optional<double>("<xmlattr>.dir_x").has_value()) {
+                        f.anchor = Vec3d(fin_tree.get<double>("<xmlattr>.anchor_x", f.anchor.x()),
+                                         fin_tree.get<double>("<xmlattr>.anchor_y", f.anchor.y()),
+                                         fin_tree.get<double>("<xmlattr>.anchor_z", f.anchor.z()));
+                        f.dir    = Vec3d(fin_tree.get<double>("<xmlattr>.dir_x", f.dir.x()),
+                                         fin_tree.get<double>("<xmlattr>.dir_y", f.dir.y()),
+                                         fin_tree.get<double>("<xmlattr>.dir_z", f.dir.z()));
+                    } else {
+                        // Legacy first-generation fin_information.xml: 2D object-local anchor +
+                        // azimuth about the object Z axis -- migrate on the fly to anchor + dir.
+                        f.anchor = Vec3d(fin_tree.get<double>("<xmlattr>.anchor_x", 0.0),
+                                         fin_tree.get<double>("<xmlattr>.anchor_y", 0.0), 0.0);
+                        f.dir    = FinGeneratorInternal::dir_from_z_angle(fin_tree.get<double>("<xmlattr>.z_angle", 0.0));
+                    }
+                    f.height    = fin_tree.get<double>("<xmlattr>.height",    f.height);
+                    f.length    = fin_tree.get<double>("<xmlattr>.length",    f.length);
+                    f.thickness = fin_tree.get<double>("<xmlattr>.thickness", f.thickness);
+                    f.conn_step = fin_tree.get<double>("<xmlattr>.conn_step", f.conn_step);
+                    f.conn_gap  = fin_tree.get<double>("<xmlattr>.conn_gap",  f.conn_gap);
+                    // Trust boundary: ptree parses "nan"/"inf" without throwing where iostreams
+                    // accept them (libstdc++ does), and Model.hpp promises dir is kept normalized
+                    // -- a hand-edited/corrupt file is the one place both can break. Skip any fin
+                    // violating either, keep the rest.
+                    const bool finite = std::isfinite(f.anchor.x()) && std::isfinite(f.anchor.y()) &&
+                                        std::isfinite(f.anchor.z()) && std::isfinite(f.dir.x()) &&
+                                        std::isfinite(f.dir.y()) && std::isfinite(f.dir.z()) &&
+                                        std::isfinite(f.height) && std::isfinite(f.length) &&
+                                        std::isfinite(f.thickness) && std::isfinite(f.conn_step) &&
+                                        std::isfinite(f.conn_gap);
+                    if (!finite || f.dir.norm() < EPSILON) {
+                        BOOST_LOG_TRIVIAL(warning) << "_BBS_3MF_Importer: skipping fin with non-finite "
+                                                       "or zero-direction parameters in " << FIN_INFORMATION_FILE;
+                        continue;
+                    }
+                    f.dir = f.dir.normalized();
+                    fins.push_back(f);
+                }
+
+                m_fin_infos.insert({ obj_idx, std::move(fins) });
             }
         }
     }
@@ -6302,6 +6411,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_project_embedded_presets_to_archive(mz_zip_archive& archive, Model& model, std::vector<Preset*> project_presets);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config, int export_plate_idx = -1, bool save_gcode = true, bool use_loaded_id = false);
         bool _add_cut_information_file_to_archive(mz_zip_archive &archive, Model &model);
+        bool _add_fin_information_file_to_archive(mz_zip_archive &archive, Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
         bool _add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn = nullptr);
@@ -6846,6 +6956,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         if (!_add_cut_information_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_information_file_to_archive failed\n");
+            return false;
+        }
+
+        if (!_add_fin_information_file_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_fin_information_file_to_archive failed\n");
             return false;
         }
 
@@ -7944,6 +8059,62 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!out.empty()) {
             if (!mz_zip_writer_add_mem(&archive, CUT_INFORMATION_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
                 add_error("Unable to add cut information file to archive");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool _BBS_3MF_Exporter::_add_fin_information_file_to_archive(mz_zip_archive &archive, Model &model)
+    {
+        std::string out = "";
+        pt::ptree tree;
+
+        unsigned int object_cnt = 0;
+        for (const ModelObject* object : model.objects) {
+            object_cnt++;
+            if (object->fins.empty())
+                continue;
+            pt::ptree& obj_tree = tree.add("fins.object", "");
+
+            obj_tree.put("<xmlattr>.id", object_cnt);
+
+            for (const FinFeature& fin : object->fins) {
+                pt::ptree& fin_tree = obj_tree.add("fin", "");
+                // 9 significant digits -- plenty for mm-scale geometry; every later comparison
+                // derives from the same stored values
+                fin_tree.put("<xmlattr>.anchor_x",  float_to_string_decimal_point(fin.anchor.x(), 9));
+                fin_tree.put("<xmlattr>.anchor_y",  float_to_string_decimal_point(fin.anchor.y(), 9));
+                fin_tree.put("<xmlattr>.anchor_z",  float_to_string_decimal_point(fin.anchor.z(), 9));
+                fin_tree.put("<xmlattr>.dir_x",     float_to_string_decimal_point(fin.dir.x(), 9));
+                fin_tree.put("<xmlattr>.dir_y",     float_to_string_decimal_point(fin.dir.y(), 9));
+                fin_tree.put("<xmlattr>.dir_z",     float_to_string_decimal_point(fin.dir.z(), 9));
+                fin_tree.put("<xmlattr>.height",    float_to_string_decimal_point(fin.height, 9));
+                fin_tree.put("<xmlattr>.length",    float_to_string_decimal_point(fin.length, 9));
+                fin_tree.put("<xmlattr>.thickness", float_to_string_decimal_point(fin.thickness, 9));
+                fin_tree.put("<xmlattr>.conn_step", float_to_string_decimal_point(fin.conn_step, 9));
+                fin_tree.put("<xmlattr>.conn_gap",  float_to_string_decimal_point(fin.conn_gap, 9));
+            }
+        }
+
+        if (!tree.empty()) {
+            std::ostringstream oss;
+            pt::write_xml(oss, tree);
+            out = oss.str();
+
+            // Post processing("beautification") of the output string for a better preview
+            boost::replace_all(out, "><object", ">\n <object");
+            boost::replace_all(out, "><fin", ">\n  <fin");
+            boost::replace_all(out, "></fin>", ">\n  </fin>");
+            boost::replace_all(out, "></object>", ">\n </object>");
+            // OR just
+            boost::replace_all(out, "><", ">\n<");
+        }
+
+        if (!out.empty()) {
+            if (!mz_zip_writer_add_mem(&archive, FIN_INFORMATION_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+                add_error("Unable to add fin information file to archive");
                 return false;
             }
         }

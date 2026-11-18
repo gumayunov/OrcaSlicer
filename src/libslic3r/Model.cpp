@@ -1340,6 +1340,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->imported_parts_hidden       = rhs.imported_parts_hidden;
     this->origin_translation          = rhs.origin_translation;
     this->cut_id.copy(rhs.cut_id);
+    this->fins                        = rhs.fins;
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -1381,6 +1382,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->auto_drop                   = rhs.auto_drop;
     this->imported_parts_hidden       = rhs.imported_parts_hidden;
     this->origin_translation          = std::move(rhs.origin_translation);
+    this->fins                        = std::move(rhs.fins);
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -4381,6 +4383,17 @@ bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo
         return true;
     for (size_t i = 0; i < mo.brim_points.size(); ++i) {
         if (mo.brim_points[i] != mo_new.brim_points[i])
+            return true;
+    }
+    return false;
+}
+
+bool model_fins_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    if (mo.fins.size() != mo_new.fins.size())
+        return true;
+    for (size_t i = 0; i < mo.fins.size(); ++i) {
+        if (mo.fins[i] != mo_new.fins[i])
             return true;
     }
     return false;

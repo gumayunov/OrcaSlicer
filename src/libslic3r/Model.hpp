@@ -350,6 +350,40 @@ struct CutConnector
 
 using CutConnectors = std::vector<CutConnector>;
 
+// A vertical "fin": a thin breakaway wall hugging the object's cross-section.
+// Parameters are stored in object-local coordinates (anchor + direction); the
+// actual wall is always vertical in the bed frame and is generated at slice
+// time (see FinGenerator). Only these parameters persist.
+struct FinFeature {
+    // Plane anchor and outward (u-axis) direction. OBJECT-LOCAL when stored in
+    // ModelObject::fins; BED-FRAME (anchor.z == 0, dir horizontal) when used as
+    // generate_one_fin() input. Full 3D point + direction so any invertible instance
+    // transform round-trips exactly (a 2D anchor_xy/z_angle pair would degenerate when
+    // the object stands on its side and silently drop every edit).
+    Vec3d  anchor {Vec3d::Zero()};
+    Vec3d  dir    {0.0, 1.0, 0.0}; // kept normalized; +Y == old z_angle=0; dir vs -dir = flip side
+    double height    {10.0};          // H — rectangle height (mm)
+    double length    {8.0};           // L — outward reach (mm)
+    double thickness {1.2};           // t — fin wall thickness (mm)
+    double conn_step {4.0};           // X — vertical spacing of connectors (mm)
+    double conn_gap  {1.0};           // gap == connector length == contour-follow distance (mm)
+
+    template<class Archive> void serialize(Archive& ar) {
+        ar(anchor, dir, height, length, thickness, conn_step, conn_gap);
+    }
+
+    // Exact field-wise comparison (used by model_fins_data_changed() to detect edits between
+    // Print::apply()'s old/new model copies -- both sides are plain struct copies, never
+    // recomputed via trig round-trips, so exact equality is deterministic here).
+    bool operator==(const FinFeature& rhs) const
+    {
+        return anchor == rhs.anchor && dir == rhs.dir && height == rhs.height &&
+               length == rhs.length && thickness == rhs.thickness && conn_step == rhs.conn_step &&
+               conn_gap == rhs.conn_gap;
+    }
+    bool operator!=(const FinFeature& rhs) const { return !(*this == rhs); }
+};
+using FinFeatures = std::vector<FinFeature>;
 
 // Declared outside of ModelVolume, so it could be forward declared.
 enum class ModelVolumeType : int {
@@ -432,6 +466,8 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+
+    FinFeatures fins;   // vertical fins; the wall geometry is generated at slice time
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
@@ -721,7 +757,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, fins);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -734,7 +770,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, fins);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -1956,6 +1992,10 @@ extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const Mod
 extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+
+// Test whether the fins list (ModelObject::fins) differs between the old and new ModelObject.
+// The function assumes the volumes list is synchronized (mirrors model_brim_points_data_changed).
+bool model_fins_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // If the model has multi-part objects, then it is currently not supported by the SLA mode.
 // Either the model cannot be loaded, or a SLA printer has to be activated.

@@ -43,6 +43,7 @@
 #include "FrameProfiler.hpp"
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
+#include "slic3r/GUI/FinGhosts.hpp"
 #include "libslic3r/Slicing.hpp"
 
 #include <float.h>
@@ -894,6 +895,7 @@ public:
 
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
+    FinGhostsRenderer m_fin_ghosts; // always-visible fin ghosts (Prepare view)
 
     struct ToolbarHighlighter
     {
@@ -1051,6 +1053,8 @@ public:
 
     const GLGizmosManager& get_gizmos_manager() const { return m_gizmos; }
     GLGizmosManager& get_gizmos_manager() { return m_gizmos; }
+
+    FinGhostsRenderer& fin_ghosts() { return m_fin_ghosts; }
 
     void bed_shape_changed();
 
@@ -1599,6 +1603,7 @@ private:
     void _render_plane() const;
     void _render_selection();
     void _render_sequential_clearance();
+    void _render_fin_ghosts();
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center() { m_selection.render_center(m_gizmos.is_dragging()); }
 #endif // ENABLE_RENDER_SELECTION_CENTER

@@ -172,6 +172,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Field.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/FinGhosts.cpp
+    GUI/FinGhosts.hpp
     GUI/format.hpp
     GUI/GCodeViewer.cpp
     GUI/GCodeViewer.hpp
@@ -191,6 +193,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoEmboss.hpp
     GUI/Gizmos/GLGizmoFdmSupports.cpp
     GUI/Gizmos/GLGizmoFdmSupports.hpp
+    GUI/Gizmos/GLGizmoFin.cpp
+    GUI/Gizmos/GLGizmoFin.hpp
     GUI/Gizmos/GLGizmoFlatten.cpp
     GUI/Gizmos/GLGizmoFlatten.hpp
     GUI/Gizmos/GLGizmoFuzzySkin.cpp

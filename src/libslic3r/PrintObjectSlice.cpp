@@ -20,6 +20,7 @@
 #include "ExPolygon.hpp"
 #include "Exception.hpp"
 #include "Flow.hpp"
+#include "Fin/FinGenerator.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "Model.hpp"
@@ -1345,6 +1346,89 @@ void apply_fuzzy_skin_segmentation(PrintObject &print_object, ThrowOnCancel thro
 // this should be idempotent
 void PrintObject::slice_volumes()
 {
+    // RAII: merge transient fin geometry into an existing MODEL_PART ModelVolume's mesh
+    // for the duration of slicing, restoring the original mesh in the destructor on every
+    // exit path (early returns, exceptions, cancellation) -- hence the very first
+    // statement of the function. `this->model_object()` is Print's OWN model copy
+    // (PrintBase.hpp), never serialized to .3mf nor shared with the GUI, so the mutation
+    // cannot leak. No locking needed: PrintObjects are sliced sequentially (Print.cpp
+    // ~2300), so slice_volumes() of two objects never overlaps. Fins must be merged into
+    // an EXISTING volume, not added as a new ModelVolume: slicing below only picks up
+    // volume ids present in PrintObjectRegions, built once in Print::apply() (see
+    // generate_print_object_regions(), PrintApply.cpp) -- a new id would be silently
+    // skipped. (delete_volume() is likewise unusable for cleanup: its collapse-to-
+    // single-volume path rewrites instance transforms, see Model.cpp.)
+    struct TransientFinGuard
+    {
+        ModelObject*                         mo       = nullptr;
+        ModelVolume*                         base_vol = nullptr; // existing MODEL_PART volume fins are merged into
+        std::shared_ptr<const TriangleMesh>  orig_mesh;          // base_vol's mesh before merging, for restoration
+
+        explicit TransientFinGuard(PrintObject& po) : mo(po.model_object())
+        {
+            // The (overwhelmingly common) no-fin case must be a true no-op: no host-volume
+            // lookup, no Flow/width resolution, no mesh copy/merge.
+            if (mo->fins.empty())
+                return;
+
+            // Fins need an existing MODEL_PART volume to merge into; with none, every fin's
+            // plane misses an empty solid and generate_fin_meshes() would return nothing anyway.
+            //
+            // Known limitations of this host-volume scheme (revisit if multi-part /
+            // multi-material fins are ever needed):
+            //  - All fins are merged into the FIRST MODEL_PART volume and use
+            //    printing_region(0)'s extrusion width, regardless of which volume a fin
+            //    is geometrically closest to -- so on a multi-part object a fin always
+            //    prints with the first volume's region (material/extruder/settings).
+            //  - PrintObjectRegions' cached per-volume bounding boxes are NOT extended
+            //    for the merged fin geometry, so a modifier/negative volume whose cached
+            //    bbox does not already cover the fin's footprint silently does not apply
+            //    to the fin's slices.
+            for (ModelVolume* v : mo->volumes)
+                if (v->is_model_part()) { base_vol = v; break; }
+            if (base_vol == nullptr)
+                return;
+
+            const Transform3d to_bed       = po.trafo_centered();
+            const double      layer_height = po.config().layer_height.value;
+            // Fins aren't tied to any particular PrintRegion, so their wall reuses the width
+            // an ordinary inner perimeter of the first region would get (PrintRegion::flow()
+            // resolves the config fallback chain and never yields 0 -- connector tabs are
+            // 2*line_width thick, so a zero width would degenerate them). A MODEL_PART volume
+            // was just found above, so printing_region(0) is always valid here.
+            const double line_width = po.printing_region(0).flow(po, frPerimeter, layer_height, /*first_layer=*/false).width();
+
+            std::vector<TriangleMesh> fins = generate_fin_meshes(*mo, to_bed, layer_height, line_width);
+            if (fins.empty()) {
+                base_vol = nullptr; // nothing to merge -> ~TransientFinGuard() also becomes a no-op
+                return;
+            }
+
+            // bed frame -> base_vol's local mesh frame: every volume is sliced under
+            // trafo_centered() * volume->get_matrix() (slice_volumes_inner() below), so fin
+            // triangles expressed in that local frame come out at exactly the bed-frame
+            // positions generate_fin_meshes() built.
+            const Transform3d bed_to_base_local = base_vol->get_matrix().inverse() * to_bed.inverse();
+
+            orig_mesh = base_vol->get_mesh_shared_ptr(); // keep the original mesh alive for restoration
+            indexed_triangle_set merged = orig_mesh->its;
+            for (TriangleMesh& fin : fins) {
+                its_transform(fin.its, bed_to_base_local);
+                its_merge(merged, fin.its);
+            }
+            base_vol->set_mesh(TriangleMesh(std::move(merged)));
+            mo->invalidate_bounding_box();
+        }
+
+        ~TransientFinGuard()
+        {
+            if (base_vol == nullptr)
+                return;
+            base_vol->set_mesh(orig_mesh);
+            mo->invalidate_bounding_box();
+        }
+    } fin_guard(*this);
+
     BOOST_LOG_TRIVIAL(info) << "Slicing volumes..." << log_memory_info();
     const Print *print                      = this->print();
     const auto   throw_on_cancel_callback   = std::function<void()>([print](){ print->throw_if_canceled(); });
